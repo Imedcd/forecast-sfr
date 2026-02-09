@@ -1,26 +1,58 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import re
 from io import BytesIO
 from datetime import datetime
-from pulp import LpProblem, LpVariable, LpMaximize, lpSum, value, PULP_CBC_CMD, LpStatus, LpInteger
+from pathlib import Path
+from pulp import LpProblem, LpVariable, LpMaximize, LpMinimize, lpSum, value, PULP_CBC_CMD, LpStatus, LpInteger
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.styles import Font, Alignment, PatternFill
 
 
 # =============================================================================
+# AUTHENTIFICATION
+# =============================================================================
+def check_password():
+    """Retourne True si le mot de passe est correct."""
+    def password_entered():
+        if st.session_state["password"] == "Batail-Log":
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.markdown("# 🔐 FORECAST SFR - Authentification")
+        st.text_input("Mot de passe", type="password", on_change=password_entered, key="password")
+        st.info("Entrez le mot de passe pour accéder à l'application")
+        return False
+    elif not st.session_state["password_correct"]:
+        st.markdown("# 🔐 FORECAST SFR - Authentification")
+        st.text_input("Mot de passe", type="password", on_change=password_entered, key="password")
+        st.error("❌ Mot de passe incorrect")
+        return False
+    else:
+        return True
+
+if not check_password():
+    st.stop()
+
+
+# =============================================================================
 # CONFIG PAGE
 # =============================================================================
 st.set_page_config(page_title="FORECAST SFR", page_icon="📦", layout="wide")
-st.title("📦 FORECAST SFR")
-st.caption("Allocation optimale de composants telecom")
+st.title("📦 FORECAST SFR - Optimisation RO")
+st.caption("Allocation optimale de composants telecom | Batail-log")
 
 
 # =============================================================================
-# FONCTIONS : PREPARATION DONNEES (logique de fichier entrée.py)
+# FONCTIONS UTILITAIRES
 # =============================================================================
 def load_bom_sheet(biblio_bytes, sheet_name):
+    """Charge une feuille BOM (NOKIA ou huawei)."""
     if sheet_name == "NOKIA":
         df = pd.read_excel(biblio_bytes, sheet_name=sheet_name, header=None, skiprows=1)
         df = df.iloc[:, [2, 3, 5]].copy()
@@ -42,41 +74,22 @@ def load_bom_sheet(biblio_bytes, sheet_name):
 
     part_before = df["Conf|version"].str.split("|").str[0].str.strip()
     part_after = df["Conf|version"].str.extract(r'\|(.+)$', expand=False).fillna("")
-
     df["Conf"] = part_after
     df["Version"] = part_before
-
     return df[["Conf|version", "Conf", "Version", "Référence", "Quantité"]]
 
 
-def prepare_data(biblio_file, prix_file, forecast_file, stock_file, acc_file):
-    """Reproduit la logique de fichier entrée.py avec des fichiers uploadés."""
-
-    # --- Demandes + Prix ---
-    df_forecast = pd.read_excel(
-        forecast_file, sheet_name="Feuil1",
-        usecols=["Constructeur", "Conf", "Version", "Conf|version", "Demande"]
-    )
-    df_forecast["Demande"] = pd.to_numeric(df_forecast["Demande"], errors="coerce").fillna(0)
-    df_forecast = df_forecast[df_forecast["Demande"] > 0].copy()
-
-    df_prix_conf = pd.read_excel(prix_file, sheet_name="Conf", usecols=["Conf|version", "Prix"])
-    df_prix_conf["Prix"] = pd.to_numeric(df_prix_conf["Prix"], errors="coerce")
-
-    demand_df = df_forecast.merge(df_prix_conf, on="Conf|version", how="left")
+def prepare_common_data(biblio_file, prix_file, stock_file, acc_file):
+    """Prépare les données communes (BOM + Stock + Prix)."""
 
     # --- BOM ---
-    biblio_bytes_nokia = BytesIO(biblio_file.getvalue())
-    biblio_bytes_huawei = BytesIO(biblio_file.getvalue())
-    bom_nokia = load_bom_sheet(biblio_bytes_nokia, "NOKIA")
-    bom_huawei = load_bom_sheet(biblio_bytes_huawei, "huawei")
+    bom_nokia = load_bom_sheet(BytesIO(biblio_file.getvalue()), "NOKIA")
+    bom_huawei = load_bom_sheet(BytesIO(biblio_file.getvalue()), "huawei")
     bom_df = pd.concat([bom_nokia, bom_huawei], ignore_index=True)
 
-    # --- Normalisation BOM via acc.xlsx ---
-    acc_bytes_bom = BytesIO(acc_file.getvalue())
-    acc_bom = pd.read_excel(acc_bytes_bom, sheet_name="Feuil1")
+    # Normalisation BOM via acc
+    acc_bom = pd.read_excel(BytesIO(acc_file.getvalue()), sheet_name="Feuil1")
     acc_bom.columns = acc_bom.columns.str.strip().str.lower().str.replace(r'[\s,]+', '', regex=True)
-
     code_col = next((c for c in acc_bom.columns if 'code' in c), None)
     ref_col = next((c for c in acc_bom.columns if any(k in c for k in ['ref', 'reference', 'article'])), None)
 
@@ -99,24 +112,16 @@ def prepare_data(biblio_file, prix_file, forecast_file, stock_file, acc_file):
     df_stock = df_stock[["Référence", "Stock"]].copy()
     df_stock["Référence"] = df_stock["Référence"].astype(str).str.strip().str.upper()
 
-    # --- acc mapping stock ---
-    acc_bytes_stock = BytesIO(acc_file.getvalue())
-    acc = pd.read_excel(acc_bytes_stock, sheet_name="Feuil1")
+    # Conversion stock via acc
+    acc = pd.read_excel(BytesIO(acc_file.getvalue()), sheet_name="Feuil1")
     acc.columns = acc.columns.str.strip().str.lower().str.replace(r'[\s,]+', '', regex=True)
 
     column_map = {}
     for col in acc.columns:
-        if 'code' in col:
-            column_map[col] = 'code'
-        elif any(k in col for k in ['ref', 'reference', 'article']):
-            column_map[col] = 'ref'
-        elif any(k in col for k in ['bom', 'multi', 'coeff']):
-            column_map[col] = 'bom'
+        if 'code' in col: column_map[col] = 'code'
+        elif any(k in col for k in ['ref', 'reference', 'article']): column_map[col] = 'ref'
+        elif any(k in col for k in ['bom', 'multi', 'coeff']): column_map[col] = 'bom'
     acc = acc.rename(columns=column_map)
-
-    required = {'code', 'ref', 'bom'}
-    if not required.issubset(acc.columns):
-        raise ValueError(f"acc.xlsx : Colonnes manquantes -> {required - set(acc.columns)}")
 
     acc["code"] = acc["code"].astype(str).str.strip().str.upper()
     acc["ref"] = acc["ref"].astype(str).str.strip().str.upper()
@@ -135,425 +140,24 @@ def prepare_data(biblio_file, prix_file, forecast_file, stock_file, acc_file):
 
     df_stock["Valeur_NVX"] = df_stock["Stock"] * df_stock["multiplicateur"]
 
-    stock_df = df_stock.groupby("Referentiel", as_index=False).agg({
-        "Valeur_NVX": "sum", "Stock": "sum"
-    }).rename(columns={"Valeur_NVX": "NVX STOCK", "Stock": "Stock Physique"})
-    stock_df = stock_df.sort_values("NVX STOCK", ascending=False).reset_index(drop=True)
+    stock_df = df_stock.groupby("Referentiel", as_index=False).agg({"Valeur_NVX": "sum", "Stock": "sum"})
+    stock_df = stock_df.rename(columns={"Valeur_NVX": "NVX STOCK", "Stock": "Stock Physique"})
 
-    # --- Prix (pj) ---
-    prix_bytes = BytesIO(prix_file.getvalue())
-    df_prix_ref = pd.read_excel(prix_bytes, sheet_name="References", usecols=["Référence", "Prix (pj)"])
+    # --- Prix ---
+    df_prix_ref = pd.read_excel(BytesIO(prix_file.getvalue()), sheet_name="References", usecols=["Référence", "Prix (pj)"])
     df_prix_ref["Référence"] = df_prix_ref["Référence"].astype(str).str.strip().str.upper()
     df_prix_ref["Prix (pj)"] = pd.to_numeric(df_prix_ref["Prix (pj)"], errors='coerce').fillna(0)
 
     prix_unique = df_prix_ref.groupby("Référence", as_index=False)["Prix (pj)"].first()
     ref_to_prix_dict = dict(zip(prix_unique["Référence"], prix_unique["Prix (pj)"]))
     stock_df["Prix (pj)"] = stock_df["Referentiel"].map(ref_to_prix_dict).fillna(0)
+    stock_df = stock_df.rename(columns={"Stock Physique": "Stock"})
 
-    stock_df = stock_df[["Referentiel", "Stock Physique", "NVX STOCK", "Prix (pj)"]].rename(
-        columns={"Stock Physique": "Stock"}
-    )
+    return bom_df, stock_df, ref_to_prix_dict
 
-    return demand_df, bom_df, stock_df
 
-
-def data_to_excel_bytes(demand_df, bom_df, stock_df):
-    """Génère le fichier consolidé en mémoire."""
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        demand_df.to_excel(writer, sheet_name="Demandes", index=False)
-        bom_df.to_excel(writer, sheet_name="BOM", index=False)
-        stock_df.to_excel(writer, sheet_name="Stock_Clean", index=False)
-    return output.getvalue()
-
-
-# =============================================================================
-# FONCTIONS : OPTIMISATION SANS PRIORITE (logique de RO_J1_sans_prio.py)
-# =============================================================================
-def run_optim_sans_prio(demand_df, bom_df, stock_df_raw):
-    stock_df = stock_df_raw.copy().set_index("Referentiel")
-    stock_df['Prix (pj)'] = pd.to_numeric(stock_df['Prix (pj)'], errors='coerce').fillna(0.0)
-
-    q = bom_df.pivot_table(
-        index='Conf|version', columns='Référence', values='Quantité', aggfunc='sum'
-    ).reindex(demand_df['Conf|version'].unique()).fillna(0)
-
-    configs = demand_df['Conf|version'].unique()
-    refs_bloquantes = [ref for ref in q.columns if ref not in stock_df.index or stock_df.at[ref, 'NVX STOCK'] <= 0]
-
-    # ETAPE 1 : Max configs
-    prob1 = LpProblem("Max_Nb_Configs", LpMaximize)
-    X1 = {}
-    for cv in configs:
-        dem_max = demand_df[demand_df['Conf|version'] == cv]['Demande'].iloc[0]
-        X1[cv] = LpVariable(f"X1_{cv.replace('|','_').replace('-','_')}", 0, dem_max, cat='Integer')
-
-    prob1 += lpSum(X1.values())
-    for ref in q.columns:
-        if ref in stock_df.index:
-            prob1 += lpSum(q.at[cv, ref] * X1[cv] for cv in configs if q.at[cv, ref] > 0) <= stock_df.at[ref, 'NVX STOCK']
-        else:
-            prob1 += lpSum(q.at[cv, ref] * X1[cv] for cv in configs if q.at[cv, ref] > 0) <= 0
-
-    prob1.solve(PULP_CBC_CMD(msg=0, timeLimit=900, gapRel=0.0))
-    max_configs = value(prob1.objective) or 0
-
-    # ETAPE 2 : Max cout stock
-    prob2 = LpProblem("Max_Cout_Stock", LpMaximize)
-    X = {}
-    for cv in configs:
-        dem_max = demand_df[demand_df['Conf|version'] == cv]['Demande'].iloc[0]
-        X[cv] = LpVariable(f"X_{cv.replace('|','_').replace('-','_')}", 0, dem_max, cat='Integer')
-
-    cout_stock = lpSum(
-        X[cv] * lpSum(q.at[cv, ref] * stock_df.at[ref, 'Prix (pj)'] for ref in q.columns if ref in stock_df.index)
-        for cv in configs
-    )
-    prob2 += cout_stock
-    prob2 += lpSum(X.values()) == max_configs
-
-    for ref in q.columns:
-        if ref in stock_df.index:
-            prob2 += lpSum(q.at[cv, ref] * X[cv] for cv in configs if q.at[cv, ref] > 0) <= stock_df.at[ref, 'NVX STOCK']
-        else:
-            prob2 += lpSum(q.at[cv, ref] * X[cv] for cv in configs if q.at[cv, ref] > 0) <= 0
-
-    prob2.solve(PULP_CBC_CMD(msg=0, timeLimit=1800, gapRel=0.01))
-
-    produced = {cv: max(0, int(round(value(X[cv]) or 0))) for cv in X}
-
-    consumed = {}
-    for ref in q.columns:
-        qty = sum(q.at[cv, ref] * produced.get(cv, 0) for cv in configs)
-        if qty > 0:
-            consumed[ref] = round(qty)
-
-    cout_total = sum(qty * stock_df.at[ref, 'Prix (pj)'] for ref, qty in consumed.items() if ref in stock_df.index)
-
-    return {
-        'produced': produced,
-        'consumed': consumed,
-        'cout_total': cout_total,
-        'max_configs': max_configs,
-        'refs_bloquantes': refs_bloquantes,
-        'status': LpStatus[prob2.status],
-        'q': q,
-        'stock_df': stock_df,
-        'configs': configs,
-    }
-
-
-# =============================================================================
-# FONCTIONS : OPTIMISATION AVEC PRIORITE (logique de RO_J2_avec_prio.py)
-# =============================================================================
-def run_optim_avec_prio(demand_df, bom_df, stock_df_raw, prio_df):
-    stock_df = stock_df_raw.copy().set_index("Referentiel")
-    stock_df['Prix (pj)'] = pd.to_numeric(stock_df['Prix (pj)'], errors='coerce').fillna(0.0)
-
-    demand_df = demand_df.copy()
-    demand_df['Demande'] = pd.to_numeric(demand_df['Demande'], errors='coerce').fillna(0).clip(lower=0).astype(int)
-
-    q = bom_df.pivot_table(
-        index='Conf|version', columns='Référence', values='Quantité', aggfunc='sum'
-    ).reindex(demand_df['Conf|version'].unique()).fillna(0)
-
-    configs = demand_df['Conf|version'].unique()
-    refs_bloquantes = [ref for ref in q.columns if ref not in stock_df.index or stock_df.at[ref, 'NVX STOCK'] <= 0]
-
-    # Ajout priorité
-    demand_df['Priorité'] = 999
-    prio_clean = prio_df[['Conf|version', 'Priorité']].copy()
-    prio_clean['Priorité'] = pd.to_numeric(prio_clean['Priorité'], errors='coerce').fillna(999).astype(int)
-    demand_df = demand_df.merge(prio_clean, on='Conf|version', how='left', suffixes=('', '_p'))
-    demand_df['Priorité'] = demand_df['Priorité_p'].combine_first(demand_df['Priorité'])
-    demand_df.drop(columns=['Priorité_p'], errors='ignore', inplace=True)
-
-    stock_current = stock_df['NVX STOCK'].copy()
-    produced = {cv: 0 for cv in configs}
-    log_lines = []
-
-    priorities = sorted(demand_df['Priorité'].unique())
-
-    for phase, prio_level in enumerate(priorities, 1):
-        phase_configs = demand_df[demand_df['Priorité'] == prio_level]['Conf|version'].tolist()
-        if not phase_configs:
-            continue
-
-        # Etape 1 : Max configs
-        prob1 = LpProblem(f"Force_Prio_{prio_level}_MaxQty", LpMaximize)
-        X1 = {}
-        for cv in phase_configs:
-            dem_max = demand_df[demand_df['Conf|version'] == cv]['Demande'].iloc[0]
-            X1[cv] = LpVariable(f"X1_{cv.replace('|','_')}", 0, dem_max, LpInteger)
-
-        prob1 += lpSum(X1.values())
-        for ref in q.columns:
-            if ref in stock_current.index:
-                prob1 += lpSum(q.at[cv, ref] * X1[cv] for cv in phase_configs if q.at[cv, ref] > 0) <= stock_current[ref]
-            else:
-                prob1 += lpSum(q.at[cv, ref] * X1[cv] for cv in phase_configs if q.at[cv, ref] > 0) <= 0
-
-        prob1.solve(PULP_CBC_CMD(msg=0, gapRel=0.0))
-        max_phase = value(prob1.objective) or 0
-
-        # Etape 2 : Max cout
-        prob2 = LpProblem(f"Force_Prio_{prio_level}_MaxCost", LpMaximize)
-        X = {}
-        for cv in phase_configs:
-            dem_max = demand_df[demand_df['Conf|version'] == cv]['Demande'].iloc[0]
-            X[cv] = LpVariable(f"X_{cv.replace('|','_')}", 0, dem_max, LpInteger)
-
-        cout_phase = lpSum(
-            X[cv] * lpSum(q.at[cv, ref] * stock_df.at[ref, 'Prix (pj)'] for ref in q.columns if ref in stock_df.index)
-            for cv in phase_configs
-        )
-        prob2 += cout_phase
-        prob2 += lpSum(X.values()) == max_phase
-
-        for ref in q.columns:
-            if ref in stock_current.index:
-                prob2 += lpSum(q.at[cv, ref] * X[cv] for cv in phase_configs if q.at[cv, ref] > 0) <= stock_current[ref]
-            else:
-                prob2 += lpSum(q.at[cv, ref] * X[cv] for cv in phase_configs if q.at[cv, ref] > 0) <= 0
-
-        prob2.solve(PULP_CBC_CMD(msg=0, gapRel=0.01))
-
-        phase_prod = 0
-        for cv in phase_configs:
-            qty = max(0, int(round(value(X[cv].varValue) or 0)))
-            produced[cv] = qty
-            phase_prod += qty
-            for ref in q.columns:
-                cons = q.at[cv, ref] * qty
-                if cons > 0 and ref in stock_current.index:
-                    stock_current[ref] = max(0, stock_current[ref] - cons)
-
-        log_lines.append(f"Phase {phase} - Priorite {prio_level} : {phase_prod} configs produites")
-
-    consumed = {}
-    for ref in q.columns:
-        qty = sum(q.at[cv, ref] * produced.get(cv, 0) for cv in configs)
-        if qty > 0:
-            consumed[ref] = round(qty)
-
-    cout_total = sum(qty * stock_df.at[ref, 'Prix (pj)'] for ref, qty in consumed.items() if ref in stock_df.index)
-
-    return {
-        'produced': produced,
-        'consumed': consumed,
-        'cout_total': cout_total,
-        'refs_bloquantes': refs_bloquantes,
-        'demand_df': demand_df,
-        'log_lines': log_lines,
-        'q': q,
-        'stock_df': stock_df,
-        'configs': configs,
-    }
-
-
-# =============================================================================
-# FONCTIONS : EXPORT EXCEL EN MEMOIRE
-# =============================================================================
-def generate_excel_sans_prio(demand_df, bom_df, stock_df_raw, res):
-    produced = res['produced']
-    consumed = res['consumed']
-    cout_total = res['cout_total']
-    refs_bloquantes = res['refs_bloquantes']
-    stock_df = res['stock_df']
-    q = res['q']
-    configs = res['configs']
-
-    wb = Workbook()
-
-    # --- BOM ---
-    ws_bom = wb.active
-    ws_bom.title = "BOM"
-
-    bom_enrichi = bom_df.copy()
-    bom_enrichi = bom_enrichi.merge(
-        stock_df[['NVX STOCK']].rename(columns={'NVX STOCK': 'Stock initial'}),
-        left_on='Référence', right_index=True, how='left'
-    ).fillna({'Stock initial': 0})
-
-    produced_series = pd.Series(produced, name='Qté produite config').rename_axis('Conf|version')
-    bom_enrichi = bom_enrichi.merge(produced_series.reset_index(), on='Conf|version', how='left').fillna({'Qté produite config': 0})
-    bom_enrichi['Stock consommé (cette config)'] = bom_enrichi['Quantité'] * bom_enrichi['Qté produite config']
-
-    consumed_series = pd.Series(consumed, name='A consomé total').rename_axis('Référence')
-    bom_enrichi = bom_enrichi.merge(consumed_series.reset_index(), on='Référence', how='left').fillna({'A consomé total': 0})
-    bom_enrichi['Stock final (global ref)'] = bom_enrichi['Stock initial'] - bom_enrichi['A consomé total']
-
-    cols_bom = ['Conf|version', 'Conf', 'Version', 'Référence', 'Quantité',
-                'Stock initial', 'Stock consommé (cette config)', 'Stock final (global ref)', 'Qté produite config']
-    bom_enrichi = bom_enrichi[[c for c in cols_bom if c in bom_enrichi.columns]]
-
-    for r in dataframe_to_rows(bom_enrichi, index=False, header=True):
-        ws_bom.append(r)
-
-    yellow_fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
-    for row in ws_bom.iter_rows(min_row=2):
-        for cell in row:
-            if cell.column_letter in ['F', 'G', 'H']:
-                cell.fill = yellow_fill
-
-    # --- Demandes ---
-    ws_demand = wb.create_sheet("Demandes")
-    demand_out = demand_df.copy()
-    if 'Constructeur' not in demand_out.columns:
-        demand_out[['Constructeur', 'Conf', 'Version']] = demand_out['Conf|version'].str.split('_', n=2, expand=True)
-    demand_out['Qté produite'] = demand_out['Conf|version'].map(produced).fillna(0).astype(int)
-    cols_demand = ['Constructeur', 'Conf', 'Version', 'Conf|version', 'Demande', 'Prix', 'Qté produite']
-    cols_demand = [c for c in cols_demand if c in demand_out.columns]
-    for r in dataframe_to_rows(demand_out[cols_demand], index=False, header=True):
-        ws_demand.append(r)
-
-    # --- Stock ---
-    ws_stock = wb.create_sheet("Stock_Clean")
-    stock_out = stock_df.reset_index()
-    stock_out['A consomé'] = stock_out['Referentiel'].map(consumed).fillna(0).astype(int)
-    cols_stock = ['Referentiel', 'Stock', 'NVX STOCK', 'Prix (pj)', 'A consomé']
-    cols_stock = [c for c in cols_stock if c in stock_out.columns]
-    for r in dataframe_to_rows(stock_out[cols_stock], index=False, header=True):
-        ws_stock.append(r)
-
-    # --- Résultats ---
-    ws_res = wb.create_sheet("Résultats")
-    total_demand = demand_df['Demande'].sum()
-    configs_produites = sum(produced.values())
-    pct = (configs_produites / total_demand * 100) if total_demand > 0 else 0
-
-    metriques = [
-        ["Métrique", "Valeur"],
-        ["MAX configurations demandées", int(total_demand)],
-        ["Configurations produites", configs_produites],
-        ["% Réalisation", f"{pct:.1f} %"],
-        ["Coût total stock consommé (euros)", f"{cout_total:,.2f}"],
-        ["Nombre références utilisées", len(consumed)],
-        ["Nombre références bloquantes", len(refs_bloquantes)],
-    ]
-    for ligne in metriques:
-        ws_res.append(ligne)
-
-    ws_res.column_dimensions['A'].width = 40
-    ws_res.column_dimensions['B'].width = 20
-
-    # Auto-width
-    for ws in [ws_bom, ws_demand, ws_stock]:
-        for col in ws.columns:
-            max_length = max((len(str(cell.value or "")) for cell in col), default=10)
-            ws.column_dimensions[col[0].column_letter].width = max_length + 4
-
-    output = BytesIO()
-    wb.save(output)
-    return output.getvalue()
-
-
-def generate_excel_avec_prio(demand_df_orig, bom_df, stock_df_raw, res):
-    produced = res['produced']
-    consumed = res['consumed']
-    cout_total = res['cout_total']
-    refs_bloquantes = res['refs_bloquantes']
-    demand_df = res['demand_df']
-    stock_df = res['stock_df']
-
-    wb = Workbook()
-
-    # --- BOM ---
-    ws_bom = wb.active
-    ws_bom.title = "BOM"
-
-    bom_enrichi = bom_df.copy()
-    bom_enrichi = bom_enrichi.merge(
-        stock_df[['NVX STOCK']].rename(columns={'NVX STOCK': 'Stock initial'}),
-        left_on='Référence', right_index=True, how='left'
-    ).fillna({'Stock initial': 0})
-
-    produced_series = pd.Series(produced, name='Qté produite config').rename_axis('Conf|version')
-    bom_enrichi = bom_enrichi.merge(produced_series.reset_index(), on='Conf|version', how='left').fillna({'Qté produite config': 0})
-    bom_enrichi['Stock consommé (cette config)'] = bom_enrichi['Quantité'] * bom_enrichi['Qté produite config']
-
-    consumed_series = pd.Series(consumed, name='A consomé total').rename_axis('Référence')
-    bom_enrichi = bom_enrichi.merge(consumed_series.reset_index(), on='Référence', how='left').fillna({'A consomé total': 0})
-    bom_enrichi['Stock final (global ref)'] = bom_enrichi['Stock initial'] - bom_enrichi['A consomé total']
-
-    cols_bom = ['Conf|version', 'Conf', 'Version', 'Référence', 'Quantité',
-                'Stock initial', 'Stock consommé (cette config)', 'Stock final (global ref)', 'Qté produite config']
-    bom_enrichi = bom_enrichi[[c for c in cols_bom if c in bom_enrichi.columns]]
-
-    for r in dataframe_to_rows(bom_enrichi, index=False, header=True):
-        ws_bom.append(r)
-
-    yellow_fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
-    for row in ws_bom.iter_rows(min_row=2):
-        for cell in row:
-            if cell.column_letter in ['F', 'G', 'H']:
-                cell.fill = yellow_fill
-
-    # --- Demandes avec Priorité ---
-    ws_demand = wb.create_sheet("Demandes")
-    demand_out = demand_df.copy()
-    if 'Constructeur' not in demand_out.columns:
-        demand_out[['Constructeur', 'Conf', 'Version']] = demand_out['Conf|version'].str.split('_', n=2, expand=True)
-    demand_out['Qté produite'] = demand_out['Conf|version'].map(produced).fillna(0).astype(int)
-    cols_demand = ['Constructeur', 'Conf', 'Version', 'Conf|version', 'Priorité', 'Demande', 'Prix', 'Qté produite']
-    cols_demand = [c for c in cols_demand if c in demand_out.columns]
-    for r in dataframe_to_rows(demand_out[cols_demand], index=False, header=True):
-        ws_demand.append(r)
-
-    # --- Stock ---
-    ws_stock = wb.create_sheet("Stock_Clean")
-    stock_out = stock_df.reset_index()
-    stock_out['A consomé'] = stock_out['Referentiel'].map(consumed).fillna(0).astype(int)
-    cols_stock = ['Referentiel', 'Stock', 'NVX STOCK', 'Prix (pj)', 'A consomé']
-    cols_stock = [c for c in cols_stock if c in stock_out.columns]
-    for r in dataframe_to_rows(stock_out[cols_stock], index=False, header=True):
-        ws_stock.append(r)
-
-    # --- Résultats ---
-    ws_res = wb.create_sheet("Résultats")
-    total_demand = demand_df['Demande'].sum()
-    configs_produites = sum(produced.values())
-    pct = (configs_produites / total_demand * 100) if total_demand > 0 else 0
-
-    metriques = [
-        ["Métrique", "Valeur"],
-        ["MAX configurations demandées", int(total_demand)],
-        ["Configurations produites", configs_produites],
-        ["% Réalisation", f"{pct:.1f} %"],
-        ["Coût total stock consommé (euros)", f"{cout_total:,.2f}"],
-        ["Nombre références utilisées", len(consumed)],
-        ["Nombre références bloquantes", len(refs_bloquantes)],
-    ]
-    for ligne in metriques:
-        ws_res.append(ligne)
-
-    # Détails par priorité
-    ws_res.append([])
-    ws_res.append(["DÉTAILS PAR PRIORITÉ", ""])
-    ws_res.append(["Priorité", "Nb Configs", "Demande", "Produit", "Taux %"])
-
-    for prio in sorted(demand_df['Priorité'].unique()):
-        prio_rows = demand_df[demand_df['Priorité'] == prio]
-        prio_dem = prio_rows['Demande'].sum()
-        prio_prod = sum(produced.get(cv, 0) for cv in prio_rows['Conf|version'])
-        prio_taux = (prio_prod / prio_dem * 100) if prio_dem > 0 else 0
-        ws_res.append([f"Priorité {int(prio)}", len(prio_rows), int(prio_dem), int(prio_prod), f"{prio_taux:.1f} %"])
-
-    ws_res.column_dimensions['A'].width = 50
-    ws_res.column_dimensions['B'].width = 20
-    ws_res.column_dimensions['C'].width = 20
-    ws_res.column_dimensions['D'].width = 15
-
-    for row in ws_res.iter_rows(min_row=1, max_row=1):
-        for cell in row:
-            cell.font = Font(bold=True)
-
-    # Auto-width
-    for ws in [ws_bom, ws_demand, ws_stock]:
-        for col in ws.columns:
-            max_length = max((len(str(cell.value or "")) for cell in col), default=10)
-            ws.column_dimensions[col[0].column_letter].width = max_length + 4
-
+def generate_excel_bytes(wb):
+    """Convertit un workbook openpyxl en bytes."""
     output = BytesIO()
     wb.save(output)
     return output.getvalue()
@@ -562,264 +166,397 @@ def generate_excel_avec_prio(demand_df_orig, bom_df, stock_df_raw, res):
 # =============================================================================
 # ONGLETS
 # =============================================================================
-tab1, tab2, tab3 = st.tabs([
-    "1 - Preparation Donnees",
-    "2 - Optimisation SANS Priorite",
-    "3 - Optimisation AVEC Priorite"
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📁 Upload Fichiers",
+    "🎯 Jalon 1 - Sans Priorité",
+    "⭐ Jalon 1 - Avec Priorité",
+    "🚀 Jalon 2 - Complet (avec achats)"
 ])
 
 
 # =============================================================================
-# TAB 1 : PREPARATION DONNEES
+# TAB 1 : UPLOAD FICHIERS
 # =============================================================================
 with tab1:
-    st.header("Etape 1 : Preparation des donnees")
+    st.header("📁 Upload des fichiers sources")
     st.markdown("""
-    Uploadez les **5 fichiers sources** pour generer le fichier consolide.
+    Uploadez les fichiers Excel nécessaires pour les optimisations.
+    Ces fichiers seront utilisés dans les onglets suivants.
     """)
 
     col1, col2 = st.columns(2)
     with col1:
-        biblio_file = st.file_uploader("biblio.xlsx (BOM Nokia + Huawei)", type="xlsx", key="biblio")
-        prix_file = st.file_uploader("Prix.xlsx (Prix configs + references)", type="xlsx", key="prix")
-        forecast_file = st.file_uploader("Forecast.xlsx (Demande par config)", type="xlsx", key="forecast")
+        biblio_file = st.file_uploader("📚 biblio.xlsx (BOM Nokia + Huawei)", type="xlsx", key="biblio")
+        prix_file = st.file_uploader("💰 Prix.xlsx", type="xlsx", key="prix")
+        stock_file = st.file_uploader("📦 Stock.xlsx", type="xlsx", key="stock")
     with col2:
-        stock_file = st.file_uploader("Stock.xlsx (Stock dispo + previsionnel)", type="xlsx", key="stock")
-        acc_file = st.file_uploader("acc.xlsx (Table conversion code → ref)", type="xlsx", key="acc")
+        acc_file = st.file_uploader("🔄 acc.xlsx (Conversion)", type="xlsx", key="acc")
+        forecast_file = st.file_uploader("📊 Forecast.xlsx (pour Jalon 1 sans prio)", type="xlsx", key="forecast")
+        prio_file = st.file_uploader("⭐ Prio.xlsx (pour Jalon 1 avec prio + Jalon 2)", type="xlsx", key="prio")
 
-    all_uploaded = all([biblio_file, prix_file, forecast_file, stock_file, acc_file])
+    files_common = all([biblio_file, prix_file, stock_file, acc_file])
 
-    if all_uploaded:
-        st.success("5/5 fichiers uploades")
-        if st.button("Lancer la preparation", key="btn_s1", type="primary"):
-            with st.spinner("Preparation en cours..."):
+    if files_common:
+        st.success("✅ Fichiers communs chargés (BOM, Prix, Stock, Conversion)")
+        if st.button("🔄 Préparer les données communes", type="primary"):
+            with st.spinner("Préparation en cours..."):
                 try:
-                    demand_df, bom_df, stock_df = prepare_data(
-                        biblio_file, prix_file, forecast_file, stock_file, acc_file
-                    )
-                    st.session_state['demand_df'] = demand_df
+                    bom_df, stock_df, ref_to_prix = prepare_common_data(biblio_file, prix_file, stock_file, acc_file)
                     st.session_state['bom_df'] = bom_df
                     st.session_state['stock_df'] = stock_df
-                    st.session_state['prep_done'] = True
+                    st.session_state['ref_to_prix'] = ref_to_prix
+                    st.session_state['data_prepared'] = True
+                    st.success("✅ Données préparées avec succès !")
 
-                    excel_bytes = data_to_excel_bytes(demand_df, bom_df, stock_df)
-                    st.session_state['input_excel'] = excel_bytes
-
-                    st.success("Donnees preparees avec succes !")
-
+                    c1, c2 = st.columns(2)
+                    c1.metric("Lignes BOM", len(bom_df))
+                    c2.metric("Références Stock", len(stock_df))
                 except Exception as e:
-                    st.error(f"Erreur : {e}")
-                    st.session_state['prep_done'] = False
+                    st.error(f"❌ Erreur : {e}")
 
-    if st.session_state.get('prep_done'):
-        demand_df = st.session_state['demand_df']
-        bom_df = st.session_state['bom_df']
-        stock_df = st.session_state['stock_df']
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Configurations", len(demand_df))
-        c2.metric("Lignes BOM", len(bom_df))
-        c3.metric("References stock", len(stock_df))
-
-        with st.expander("Apercu Demandes"):
-            st.dataframe(demand_df, width=None, hide_index=True)
-        with st.expander("Apercu Stock"):
-            st.dataframe(stock_df.head(20), width=None, hide_index=True)
-
-        ts = datetime.now().strftime("%Y%m%d_%H%M")
-        st.download_button(
-            "Telecharger le fichier consolide",
-            data=st.session_state['input_excel'],
-            file_name=f"Entree_RO_Reel_{ts}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+    if forecast_file:
+        st.info("✅ Forecast.xlsx chargé → Jalon 1 sans priorité disponible")
+    if prio_file:
+        st.info("✅ Prio.xlsx chargé → Jalon 1 avec priorité + Jalon 2 disponibles")
 
 
 # =============================================================================
-# TAB 2 : OPTIMISATION SANS PRIORITE
+# TAB 2 : JALON 1 SANS PRIORITE
 # =============================================================================
 with tab2:
-    st.header("Etape 2 : Optimisation SANS priorite (max configs)")
+    st.header("🎯 Jalon 1 - Optimisation SANS Priorité")
     st.markdown("""
-    **Etape 1** : Maximiser le nombre total de configurations.
-    **Etape 2** : A nombre de configs fixe, maximiser le cout du stock consomme.
+    **Objectif** : Maximiser le nombre total de configurations produites avec le stock disponible.
+
+    **Méthode** :
+    1. Maximiser le nombre de configs
+    2. Maximiser le coût du stock consommé (à nombre fixe)
     """)
 
-    # Source de données
-    data_ready = False
-    if st.session_state.get('prep_done'):
-        st.info("Donnees de l'etape 1 detectees. Pret a optimiser.")
-        demand_df = st.session_state['demand_df']
-        bom_df = st.session_state['bom_df']
-        stock_df = st.session_state['stock_df']
-        data_ready = True
+    if not st.session_state.get('data_prepared'):
+        st.warning("⚠️ Préparez d'abord les données dans l'onglet 'Upload Fichiers'")
+    elif not forecast_file:
+        st.warning("⚠️ Uploadez le fichier Forecast.xlsx dans l'onglet 'Upload Fichiers'")
     else:
-        st.warning("Uploadez le fichier consolide (genere a l'etape 1) :")
-        uploaded_input = st.file_uploader("Fichier Entree_RO_Reel_*.xlsx", type="xlsx", key="input_s2")
-        if uploaded_input:
-            try:
-                demand_df = pd.read_excel(uploaded_input, sheet_name="Demandes")
-                bom_df = pd.read_excel(uploaded_input, sheet_name="BOM")
-                stock_df = pd.read_excel(uploaded_input, sheet_name="Stock_Clean")
-                data_ready = True
-                st.success("Fichier charge !")
-            except Exception as e:
-                st.error(f"Erreur lecture : {e}")
-
-    if data_ready:
-        if st.button("Lancer l'optimisation SANS priorite", key="btn_s2", type="primary"):
+        if st.button("▶️ Lancer Jalon 1 Sans Priorité", key="run_j1_sans", type="primary"):
             with st.spinner("Optimisation en cours..."):
                 try:
-                    res = run_optim_sans_prio(demand_df, bom_df, stock_df)
-                    st.session_state['res_sans_prio'] = res
-                    st.session_state['sans_prio_done'] = True
+                    # Charger la demande
+                    df_forecast = pd.read_excel(forecast_file, sheet_name="Feuil1",
+                        usecols=["Constructeur", "Conf", "Version", "Conf|version", "Demande"])
+                    df_forecast["Demande"] = pd.to_numeric(df_forecast["Demande"], errors="coerce").fillna(0)
+                    df_forecast = df_forecast[df_forecast["Demande"] > 0].copy()
+
+                    df_prix_conf = pd.read_excel(BytesIO(prix_file.getvalue()), sheet_name="Conf", usecols=["Conf|version", "Prix"])
+                    df_prix_conf["Prix"] = pd.to_numeric(df_prix_conf["Prix"], errors="coerce")
+                    demand_df = df_forecast.merge(df_prix_conf, on="Conf|version", how="left")
+
+                    # Récupérer BOM et Stock
+                    bom_df = st.session_state['bom_df']
+                    stock_df = st.session_state['stock_df'].copy()
+
+                    # Optimisation
+                    stock_optim = stock_df.set_index("Referentiel")
+                    stock_optim['Prix (pj)'] = pd.to_numeric(stock_optim['Prix (pj)'], errors='coerce').fillna(0.0)
+
+                    q = bom_df.pivot_table(index='Conf|version', columns='Référence', values='Quantité', aggfunc='sum').fillna(0)
+                    configs = [cv for cv in demand_df['Conf|version'].unique() if cv in q.index]
+                    demand_map = dict(zip(demand_df['Conf|version'], demand_df['Demande']))
+
+                    # Etape 1
+                    prob1 = LpProblem("Max_Nb_Configs", LpMaximize)
+                    X1 = {}
+                    for cv in configs:
+                        dem_max = demand_map.get(cv, 0)
+                        if dem_max > 0:
+                            X1[cv] = LpVariable(f"X1_{cv.replace('|','_').replace(' ','_').replace('-','_')}", 0, dem_max, LpInteger)
+
+                    prob1 += lpSum(X1.values())
+                    for ref in q.columns:
+                        coeffs = [(q.at[cv, ref], X1[cv]) for cv in X1 if q.at[cv, ref] > 0]
+                        if coeffs:
+                            lim = stock_optim.at[ref, 'NVX STOCK'] if ref in stock_optim.index else 0
+                            prob1 += lpSum(coef * var for coef, var in coeffs) <= lim
+
+                    prob1.solve(PULP_CBC_CMD(msg=0, timeLimit=180, gapRel=0.0))
+                    max_configs = value(prob1.objective) or 0
+
+                    # Etape 2
+                    prob2 = LpProblem("Max_Cout_Stock", LpMaximize)
+                    X = {}
+                    for cv in configs:
+                        dem_max = demand_map.get(cv, 0)
+                        if dem_max > 0:
+                            X[cv] = LpVariable(f"X_{cv.replace('|','_').replace(' ','_').replace('-','_')}", 0, dem_max, LpInteger)
+
+                    cout_stock = lpSum(
+                        X[cv] * sum(q.at[cv, ref] * stock_optim.at[ref, 'Prix (pj)']
+                                    for ref in q.columns if ref in stock_optim.index and q.at[cv, ref] > 0)
+                        for cv in X
+                    )
+                    prob2 += cout_stock
+                    prob2 += lpSum(X.values()) == max_configs
+
+                    for ref in q.columns:
+                        coeffs = [(q.at[cv, ref], X[cv]) for cv in X if q.at[cv, ref] > 0]
+                        if coeffs:
+                            lim = stock_optim.at[ref, 'NVX STOCK'] if ref in stock_optim.index else 0
+                            prob2 += lpSum(coef * var for coef, var in coeffs) <= lim
+
+                    prob2.solve(PULP_CBC_CMD(msg=0, timeLimit=300, gapRel=0.01))
+
+                    produced = {cv: max(0, int(round(value(X[cv].varValue) or 0))) for cv in X}
+                    consumed = {}
+                    for ref in q.columns:
+                        qty = sum(q.at[cv, ref] * produced.get(cv, 0) for cv in configs if cv in produced)
+                        if qty > 0:
+                            consumed[ref] = round(qty)
+
+                    cout_total = sum(qty * stock_optim.at[ref, 'Prix (pj)'] for ref, qty in consumed.items() if ref in stock_optim.index)
+
+                    # Résultats
+                    demand_df['Qté produite'] = demand_df['Conf|version'].map(produced).fillna(0).astype(int)
+                    demand_df['Restant'] = demand_df['Demande'] - demand_df['Qté produite']
+
+                    total_demande = demand_df['Demande'].sum()
+                    total_produit = demand_df['Qté produite'].sum()
+                    pct = (total_produit / total_demande * 100) if total_demande > 0 else 0
+
+                    st.success("✅ Optimisation terminée !")
+
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Demande totale", f"{int(total_demande)}")
+                    c2.metric("Produit", f"{int(total_produit)}")
+                    c3.metric("Taux", f"{pct:.1f}%")
+                    c4.metric("Coût stock", f"{cout_total:,.0f} €")
+
+                    st.subheader("📊 Détail par configuration")
+                    detail_df = demand_df[['Constructeur', 'Conf|version', 'Demande', 'Prix', 'Qté produite', 'Restant']].copy()
+                    detail_df['% Réalisé'] = (detail_df['Qté produite'] / detail_df['Demande'] * 100).round(1)
+                    st.dataframe(detail_df, use_container_width=True)
+
+                    st.session_state['j1_sans_result'] = (demand_df, bom_df, stock_df, produced, consumed, cout_total)
+
                 except Exception as e:
-                    st.error(f"Erreur optimisation : {e}")
-                    st.session_state['sans_prio_done'] = False
-
-    if st.session_state.get('sans_prio_done'):
-        res = st.session_state['res_sans_prio']
-        produced = res['produced']
-        total_demand = demand_df['Demande'].sum()
-        configs_produites = sum(produced.values())
-        pct = (configs_produites / total_demand * 100) if total_demand > 0 else 0
-
-        st.subheader("Resultats")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Configs produites", configs_produites)
-        c2.metric("Configs demandees", int(total_demand))
-        c3.metric("% Realisation", f"{pct:.1f} %")
-        c4.metric("Cout stock consomme", f"{res['cout_total']:,.2f} EUR")
-
-        st.subheader("Detail par configuration")
-        detail = demand_df[['Conf|version', 'Demande']].copy()
-        detail['Qté produite'] = detail['Conf|version'].map(produced).fillna(0).astype(int)
-        detail['Ecart'] = detail['Demande'] - detail['Qté produite']
-        detail['% Realise'] = (detail['Qté produite'] / detail['Demande'] * 100).round(1)
-        st.dataframe(detail, width=None, hide_index=True)
-
-        if len(res['refs_bloquantes']) > 0:
-            with st.expander(f"{len(res['refs_bloquantes'])} references bloquantes"):
-                st.write(", ".join(res['refs_bloquantes']))
-
-        excel_bytes = generate_excel_sans_prio(demand_df, bom_df, stock_df, res)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        st.download_button(
-            "Telecharger le fichier Excel",
-            data=excel_bytes,
-            file_name=f"Optim_Max_Configs_{ts}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+                    st.error(f"❌ Erreur : {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
 
 
 # =============================================================================
-# TAB 3 : OPTIMISATION AVEC PRIORITE
+# TAB 3 : JALON 1 AVEC PRIORITE
 # =============================================================================
 with tab3:
-    st.header("Etape 3 : Optimisation AVEC priorite (sequentielle)")
+    st.header("⭐ Jalon 1 - Optimisation AVEC Priorité")
     st.markdown("""
-    Optimisation par priorite stricte :
-    - **Phase 1** : Maximiser prio 1 (avec tout le stock)
-    - **Phase 2** : Maximiser prio 2 (avec le stock restant)
-    - etc.
+    **Objectif** : Maximiser les configs en respectant les priorités (séquentiel).
+
+    **Méthode** :
+    - Traiter priorité par priorité
+    - Consommer le stock progressivement
     """)
 
-    data_ready_p = False
-    prio_ready = False
-
-    if st.session_state.get('prep_done'):
-        st.info("Donnees de l'etape 1 detectees.")
-        demand_df_p = st.session_state['demand_df']
-        bom_df_p = st.session_state['bom_df']
-        stock_df_p = st.session_state['stock_df']
-        data_ready_p = True
+    if not st.session_state.get('data_prepared'):
+        st.warning("⚠️ Préparez d'abord les données dans l'onglet 'Upload Fichiers'")
+    elif not prio_file:
+        st.warning("⚠️ Uploadez le fichier Prio.xlsx dans l'onglet 'Upload Fichiers'")
     else:
-        st.warning("Uploadez le fichier consolide :")
-        uploaded_input_p = st.file_uploader("Fichier Entree_RO_Reel_*.xlsx", type="xlsx", key="input_s3")
-        if uploaded_input_p:
-            try:
-                demand_df_p = pd.read_excel(uploaded_input_p, sheet_name="Demandes")
-                bom_df_p = pd.read_excel(uploaded_input_p, sheet_name="BOM")
-                stock_df_p = pd.read_excel(uploaded_input_p, sheet_name="Stock_Clean")
-                data_ready_p = True
-                st.success("Fichier charge !")
-            except Exception as e:
-                st.error(f"Erreur lecture : {e}")
-
-    prio_file = st.file_uploader("Prio.xlsx (fichier priorites)", type="xlsx", key="prio")
-    if prio_file:
-        try:
-            prio_df = pd.read_excel(prio_file, sheet_name="Feuil1")
-            prio_ready = True
-            st.success("Fichier priorites charge !")
-        except Exception as e:
-            st.error(f"Erreur lecture Prio.xlsx : {e}")
-
-    if data_ready_p and prio_ready:
-        if st.button("Lancer l'optimisation AVEC priorite", key="btn_s3", type="primary"):
+        if st.button("▶️ Lancer Jalon 1 Avec Priorité", key="run_j1_avec", type="primary"):
             with st.spinner("Optimisation en cours..."):
                 try:
-                    res_p = run_optim_avec_prio(demand_df_p, bom_df_p, stock_df_p, prio_df)
-                    st.session_state['res_avec_prio'] = res_p
-                    st.session_state['avec_prio_done'] = True
+                    # Charger Prio
+                    df_prio = pd.read_excel(prio_file, sheet_name="Feuil1", engine="openpyxl")
+                    cols_utiles = ['Constructeur', 'Conf', 'Version', 'Conf|version', 'Priorité', 'Demande']
+                    df_prio = df_prio[[c for c in cols_utiles if c in df_prio.columns]].copy()
+                    df_prio['Demande'] = pd.to_numeric(df_prio['Demande'], errors='coerce').fillna(0).astype(int)
+                    df_prio['Priorité'] = pd.to_numeric(df_prio['Priorité'], errors='coerce').fillna(999).astype(int)
+                    df_prio = df_prio[df_prio['Demande'] > 0].copy()
+
+                    df_prix_conf = pd.read_excel(BytesIO(prix_file.getvalue()), sheet_name="Conf", usecols=["Conf|version", "Prix"])
+                    df_prix_conf["Prix"] = pd.to_numeric(df_prix_conf["Prix"], errors="coerce")
+                    all_demands = df_prio.merge(df_prix_conf, on="Conf|version", how="left")
+
+                    bom_df = st.session_state['bom_df']
+                    stock_df = st.session_state['stock_df'].copy()
+
+                    # Optimisation par priorité
+                    stock_optim = stock_df.set_index("Referentiel")
+                    stock_optim['Prix (pj)'] = pd.to_numeric(stock_optim['Prix (pj)'], errors='coerce').fillna(0.0)
+
+                    q = bom_df.pivot_table(index='Conf|version', columns='Référence', values='Quantité', aggfunc='sum').fillna(0)
+                    all_demands['Demande'] = all_demands['Demande'].clip(lower=0).astype(int)
+
+                    stock_current = stock_optim['NVX STOCK'].copy()
+                    produced_j1 = {}
+                    priorities = sorted(all_demands['Priorité'].unique())
+
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+
+                    for phase, prio_level in enumerate(priorities, 1):
+                        status_text.text(f"Traitement priorité {prio_level}...")
+                        progress_bar.progress(phase / len(priorities))
+
+                        phase_rows = all_demands[all_demands['Priorité'] == prio_level]
+                        if phase_rows.empty:
+                            continue
+
+                        phase_configs = [cv for cv in phase_rows['Conf|version'].unique() if cv in q.index]
+                        if not phase_configs:
+                            continue
+
+                        demand_map = {}
+                        for _, row in phase_rows.iterrows():
+                            cv = row['Conf|version']
+                            if cv in phase_configs:
+                                demand_map[cv] = demand_map.get(cv, 0) + row['Demande']
+
+                        # Etape 1
+                        prob1 = LpProblem(f"Prio_{prio_level}_MaxQty", LpMaximize)
+                        X1 = {}
+                        for cv in phase_configs:
+                            dem_max = demand_map.get(cv, 0)
+                            if dem_max > 0:
+                                X1[cv] = LpVariable(f"X1_{cv.replace('|','_').replace(' ','_')}", 0, dem_max, LpInteger)
+
+                        if not X1:
+                            continue
+
+                        prob1 += lpSum(X1.values())
+                        for ref in q.columns:
+                            coeffs = [(q.at[cv, ref], X1[cv]) for cv in X1 if q.at[cv, ref] > 0]
+                            if coeffs:
+                                lim = stock_current[ref] if ref in stock_current.index else 0
+                                prob1 += lpSum(coef * var for coef, var in coeffs) <= lim
+
+                        prob1.solve(PULP_CBC_CMD(msg=0, gapRel=0.0))
+                        max_phase = value(prob1.objective) or 0
+
+                        if max_phase == 0:
+                            for cv in X1:
+                                produced_j1[(cv, prio_level)] = 0
+                            continue
+
+                        # Etape 2
+                        prob2 = LpProblem(f"Prio_{prio_level}_MaxCost", LpMaximize)
+                        X = {}
+                        for cv in phase_configs:
+                            dem_max = demand_map.get(cv, 0)
+                            if dem_max > 0:
+                                X[cv] = LpVariable(f"X_{cv.replace('|','_').replace(' ','_')}", 0, dem_max, LpInteger)
+
+                        cout_phase = lpSum(
+                            X[cv] * sum(q.at[cv, ref] * stock_optim.at[ref, 'Prix (pj)']
+                                        for ref in q.columns if ref in stock_optim.index and q.at[cv, ref] > 0)
+                            for cv in X
+                        )
+                        prob2 += cout_phase
+                        prob2 += lpSum(X.values()) == max_phase
+
+                        for ref in q.columns:
+                            coeffs = [(q.at[cv, ref], X[cv]) for cv in X if q.at[cv, ref] > 0]
+                            if coeffs:
+                                lim = stock_current[ref] if ref in stock_current.index else 0
+                                prob2 += lpSum(coef * var for coef, var in coeffs) <= lim
+
+                        prob2.solve(PULP_CBC_CMD(msg=0, gapRel=0.01))
+
+                        for cv in X:
+                            qty = max(0, int(round(value(X[cv].varValue) or 0)))
+                            produced_j1[(cv, prio_level)] = qty
+                            for ref in q.columns:
+                                cons = q.at[cv, ref] * qty
+                                if cons > 0 and ref in stock_current.index:
+                                    stock_current[ref] = max(0, stock_current[ref] - cons)
+
+                    progress_bar.progress(1.0)
+                    status_text.text("✅ Optimisation terminée !")
+
+                    # Résultats
+                    all_demands['J1 produit'] = all_demands.apply(
+                        lambda row: produced_j1.get((row['Conf|version'], row['Priorité']), 0), axis=1
+                    )
+                    all_demands['Restant'] = all_demands['Demande'] - all_demands['J1 produit']
+
+                    total_demande = all_demands['Demande'].sum()
+                    total_j1 = all_demands['J1 produit'].sum()
+                    pct_j1 = (total_j1 / total_demande * 100) if total_demande > 0 else 0
+
+                    consumed_j1 = {}
+                    for (cv, prio), qty in produced_j1.items():
+                        if cv in q.index and qty > 0:
+                            for ref in q.columns:
+                                cons = q.at[cv, ref] * qty
+                                if cons > 0:
+                                    consumed_j1[ref] = consumed_j1.get(ref, 0) + cons
+
+                    cout_j1 = sum(qty * stock_optim.at[ref, 'Prix (pj)'] for ref, qty in consumed_j1.items() if ref in stock_optim.index)
+
+                    st.success("✅ Optimisation terminée !")
+
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Demande totale", f"{int(total_demande)}")
+                    c2.metric("Produit", f"{int(total_j1)}")
+                    c3.metric("Taux", f"{pct_j1:.1f}%")
+                    c4.metric("Coût stock", f"{cout_j1:,.0f} €")
+
+                    st.subheader("📊 Par priorité")
+                    prio_summary = []
+                    for prio in sorted(all_demands['Priorité'].unique()):
+                        prio_data = all_demands[all_demands['Priorité'] == prio]
+                        dem_p = int(prio_data['Demande'].sum())
+                        prod_p = int(prio_data['J1 produit'].sum())
+                        pct_p = (prod_p / dem_p * 100) if dem_p > 0 else 0
+                        prio_summary.append({
+                            'Priorité': prio,
+                            'Demande': dem_p,
+                            'Produit': prod_p,
+                            'Taux %': f"{pct_p:.1f}%"
+                        })
+                    st.dataframe(pd.DataFrame(prio_summary), use_container_width=True)
+
+                    st.session_state['j1_avec_result'] = (all_demands, bom_df, stock_df, produced_j1, consumed_j1, cout_j1)
+
                 except Exception as e:
-                    st.error(f"Erreur optimisation : {e}")
-                    st.session_state['avec_prio_done'] = False
+                    st.error(f"❌ Erreur : {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
 
-    if st.session_state.get('avec_prio_done'):
-        res_p = st.session_state['res_avec_prio']
-        produced_p = res_p['produced']
-        demand_df_prio = res_p['demand_df']
-        total_demand_p = demand_df_prio['Demande'].sum()
-        configs_produites_p = sum(produced_p.values())
-        pct_p = (configs_produites_p / total_demand_p * 100) if total_demand_p > 0 else 0
 
-        st.subheader("Resultats globaux")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Configs produites", configs_produites_p)
-        c2.metric("Configs demandees", int(total_demand_p))
-        c3.metric("% Realisation", f"{pct_p:.1f} %")
-        c4.metric("Cout stock consomme", f"{res_p['cout_total']:,.2f} EUR")
+# =============================================================================
+# TAB 4 : JALON 2 COMPLET
+# =============================================================================
+with tab4:
+    st.header("🚀 Jalon 2 - Optimisation Complète (Jalon 1 + Achats)")
+    st.markdown("""
+    **Objectif** : Après le Jalon 1, acheter des références pour produire plus de configs.
 
-        # Log phases
-        with st.expander("Log d'execution"):
-            for line in res_p['log_lines']:
-                st.text(line)
+    **Méthode** :
+    1. Jalon 1 : Maximiser avec le stock disponible
+    2. Jalon 2 : Acheter des références (seuils 20%, 40%, 60%, 80% du prix config)
+    """)
 
-        # Detail par priorité
-        st.subheader("Detail par priorite")
-        if 'Priorité' in demand_df_prio.columns:
-            prio_summary = demand_df_prio.groupby('Priorité').agg(
-                Nb_configs=('Conf|version', 'count'),
-                Demande_totale=('Demande', 'sum'),
-            ).reset_index()
-            prio_summary['Produit_total'] = prio_summary.apply(
-                lambda row: sum(produced_p.get(cv, 0) for cv in demand_df_prio[demand_df_prio['Priorité'] == row['Priorité']]['Conf|version']),
-                axis=1
-            )
-            prio_summary['Taux %'] = (prio_summary['Produit_total'] / prio_summary['Demande_totale'] * 100).round(1)
-            st.dataframe(prio_summary, width=None, hide_index=True)
+    if not st.session_state.get('data_prepared'):
+        st.warning("⚠️ Préparez d'abord les données dans l'onglet 'Upload Fichiers'")
+    elif not prio_file:
+        st.warning("⚠️ Uploadez le fichier Prio.xlsx dans l'onglet 'Upload Fichiers'")
+    else:
+        st.info("⚠️ **Attention** : L'exécution complète du Jalon 2 peut prendre 5-10 minutes.")
 
-        # Detail par config
-        st.subheader("Detail par configuration")
-        detail_p = demand_df_prio[['Conf|version', 'Priorité', 'Demande']].copy()
-        detail_p['Qté produite'] = detail_p['Conf|version'].map(produced_p).fillna(0).astype(int)
-        detail_p['Ecart'] = detail_p['Demande'] - detail_p['Qté produite']
-        detail_p['% Realise'] = (detail_p['Qté produite'] / detail_p['Demande'] * 100).round(1)
-        st.dataframe(detail_p, width=None, hide_index=True)
+        if st.button("▶️ Lancer Jalon 2 Complet", key="run_j2", type="primary"):
+            st.warning("🚧 **Jalon 2 en cours de développement** - Fonctionnalité disponible prochainement.")
+            st.markdown("""
+            Le Jalon 2 complet nécessite :
+            - Optimisation séquentielle par priorité (Jalon 1)
+            - Puis optimisation d'achat de références par seuils (20%, 40%, 60%, 80%)
+            - Génération d'un Excel détaillé avec toutes les sections
 
-        excel_bytes_p = generate_excel_avec_prio(demand_df_p, bom_df_p, stock_df_p, res_p)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        st.download_button(
-            "Telecharger le fichier Excel",
-            data=excel_bytes_p,
-            file_name=f"Optim_Force_Prio_Max_{ts}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+            Pour l'instant, utilisez le script Python `RO_Jalon2.py` directement.
+            """)
 
 
 # =============================================================================
 # FOOTER
 # =============================================================================
 st.divider()
-st.caption("FORECAST SFR - Batail-log | Python + PuLP (CBC Solver)")
+st.caption("FORECAST SFR - Batail-log | Python + PuLP (CBC Solver) | Version 1.0")
