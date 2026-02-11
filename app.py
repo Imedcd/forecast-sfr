@@ -38,10 +38,10 @@ st.markdown("""
         padding: 0 0 1.5rem 0; border-bottom: 1px solid #1E2A3A; margin-bottom: 2rem;
     }
     .main-title { font-size: 1.6rem; font-weight: 700; color: #FFFFFF; margin: 0; }
-    .main-title span { color: #00D9FF; }
+    .main-title span { color: #457DD9; }
     .main-badge {
-        font-size: 0.7rem; background: rgba(0,217,255,0.1); color: #00D9FF;
-        border: 1px solid rgba(0,217,255,0.3); padding: 0.3rem 0.8rem;
+        font-size: 0.7rem; background: rgba(69,125,217,0.1); color: #457DD9;
+        border: 1px solid rgba(69,125,217,0.3); padding: 0.3rem 0.8rem;
         border-radius: 100px; font-weight: 500; letter-spacing: 1px; text-transform: uppercase;
     }
     .stTabs [data-baseweb="tab-list"] {
@@ -52,9 +52,9 @@ st.markdown("""
         background: transparent; border-radius: 8px; color: #6B7689;
         font-weight: 500; font-size: 0.9rem; padding: 0.6rem 1.4rem; border: none;
     }
-    .stTabs [aria-selected="true"] { background: #00D9FF !important; color: #0A0D14 !important; font-weight: 600; }
+    .stTabs [aria-selected="true"] { background: #457DD9 !important; color: #FFFFFF !important; font-weight: 600; }
     .info-block {
-        background: #131720; border: 1px solid #1E2A3A; border-left: 3px solid #00D9FF;
+        background: #131720; border: 1px solid #1E2A3A; border-left: 3px solid #457DD9;
         border-radius: 10px; padding: 1.25rem 1.5rem; margin: 1rem 0 1.5rem 0;
         font-size: 0.9rem; color: #B0B8C4; line-height: 1.8;
     }
@@ -64,11 +64,11 @@ st.markdown("""
         font-size: 0.9rem; color: #B0B8C4;
     }
     .stButton > button[kind="primary"] {
-        background: #00D9FF; color: #0A0D14; font-weight: 600; border: none;
+        background: #457DD9; color: #FFFFFF; font-weight: 600; border: none;
         border-radius: 8px; padding: 0.65rem 2rem; font-size: 0.9rem; transition: all 0.2s;
     }
     .stButton > button[kind="primary"]:hover {
-        background: #33E3FF; box-shadow: 0 0 20px rgba(0,217,255,0.35); transform: translateY(-1px);
+        background: #5B8FE0; box-shadow: 0 0 20px rgba(69,125,217,0.35); transform: translateY(-1px);
     }
     .stButton > button:not([kind="primary"]) {
         background: #131720; color: #B0B8C4; border: 1px solid #1E2A3A; border-radius: 8px;
@@ -79,9 +79,13 @@ st.markdown("""
     [data-testid="stMetricLabel"] {
         font-size: 0.8rem; color: #6B7689; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;
     }
-    [data-testid="stMetricValue"] { font-size: 1.8rem; font-weight: 700; color: #00D9FF; }
+    [data-testid="stMetricValue"] { font-size: 1.8rem; font-weight: 700; color: #457DD9; }
     [data-testid="stFileUploader"] {
-        background: #131720; border: 1.5px dashed #1E2A3A; border-radius: 10px; padding: 0.5rem;
+        background: #131720; border: 1.5px dashed #457DD9; border-radius: 10px; padding: 0.5rem;
+    }
+    [data-testid="stFileUploader"] label { color: #B0B8C4 !important; font-weight: 500; }
+    [data-testid="stFileUploaderDropzone"] {
+        background: rgba(69,125,217,0.05) !important; border: 1.5px dashed #457DD9 !important; border-radius: 8px !important;
     }
     [data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; border: 1px solid #1E2A3A; }
     hr { border-color: #1E2A3A; }
@@ -112,7 +116,7 @@ def check_password():
             st.markdown("""
             <div style="text-align:center; padding: 4rem 0 2rem 0;">
                 <div style="font-size:3rem; font-weight:700; color:#FFFFFF; letter-spacing:-2px;">
-                    FORECAST<span style="color:#00D9FF;">SFR</span>
+                    FORECAST<span style="color:#457DD9;">SFR</span>
                 </div>
                 <div style="font-size:0.8rem; color:#6B7689; text-transform:uppercase; letter-spacing:3px; margin-top:0.5rem;">
                     Optimisation RO &nbsp;·&nbsp; Batail-log
@@ -316,7 +320,7 @@ def run_jalon1(all_demands, bom_df, stock_df, q, priorities, prix_file_bytes):
                     stock_current[ref] = max(0, stock_current[ref] - cons)
 
     progress_bar.progress(1.0)
-    status_text.text("Jalon 1 termine")
+    status_text.text("Optimisation terminée")
 
     consumed_j1 = {}
     for (cv, prio), qty in produced_j1.items():
@@ -344,25 +348,24 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # TAB 1 : UPLOAD
 # =============================================================================
 with tab1:
-    st.markdown('<div class="section-title">Upload des fichiers sources</div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-sub">Chargez les fichiers Excel avant de lancer une optimisation.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Préparation des données</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-sub">Chargez les 6 fichiers Excel ci-dessous, puis cliquez sur <strong style="color:#FFFFFF;">Préparer les données communes</strong>.</div>', unsafe_allow_html=True)
 
     col1, col2 = st.columns(2, gap="large")
     with col1:
-        st.markdown('<div class="label-cat">Fichiers obligatoires</div>', unsafe_allow_html=True)
-        biblio_file = st.file_uploader("biblio.xlsx — BOM Nokia + Huawei", type="xlsx", key="biblio")
-        prix_file = st.file_uploader("Prix.xlsx", type="xlsx", key="prix")
-        stock_file = st.file_uploader("Stock.xlsx", type="xlsx", key="stock")
+        st.markdown('<div class="label-cat">Fichiers requis</div>', unsafe_allow_html=True)
+        biblio_file = st.file_uploader("📂 biblio.xlsx — BOM Nokia + Huawei", type="xlsx", key="biblio")
+        prix_file = st.file_uploader("📂 Prix.xlsx — Prix des configurations et références", type="xlsx", key="prix")
+        stock_file = st.file_uploader("📂 Stock.xlsx — Stock disponible", type="xlsx", key="stock")
     with col2:
         st.markdown('<div class="label-cat">Fichiers de configuration</div>', unsafe_allow_html=True)
-        acc_file = st.file_uploader("acc.xlsx — Table de conversion", type="xlsx", key="acc")
-        forecast_file = st.file_uploader("Forecast.xlsx — Jalon 1 sans priorité", type="xlsx", key="forecast")
-        prio_file = st.file_uploader("Prio.xlsx — Jalon 1 avec priorité + Jalon 2", type="xlsx", key="prio")
+        acc_file = st.file_uploader("📂 acc.xlsx — Table de conversion des références", type="xlsx", key="acc")
+        forecast_file = st.file_uploader("📂 Forecast.xlsx — Demandes Jalon 1 sans priorité", type="xlsx", key="forecast")
+        prio_file = st.file_uploader("📂 Prio.xlsx — Demandes Jalon 1 avec priorité + Jalon 2", type="xlsx", key="prio")
 
     st.markdown("<br>", unsafe_allow_html=True)
     files_common = all([biblio_file, prix_file, stock_file, acc_file])
     if files_common:
-        st.success("Fichiers communs chargés")
         if st.button("Préparer les données communes", type="primary"):
             with st.spinner("Chargement et normalisation..."):
                 try:
@@ -373,16 +376,12 @@ with tab1:
                     st.session_state['data_prepared'] = True
                     st.success("Données prêtes")
                     c1, c2, c3 = st.columns(3)
-                    c1.metric("Lignes BOM", len(bom_df))
+                    c1.metric("Nombre de configurations", len(bom_df))
                     c2.metric("Références stock", len(stock_df))
                     val_stock = (stock_df['NVX STOCK'] * stock_df['Prix (pj)']).sum()
-                    c3.metric("Valeur stock total", f"{val_stock:,.0f} €")
+                    c3.metric("Valeur stock total", f"{val_stock:,.0f} €".replace(',', ' '))
                 except Exception as e:
                     st.error(f"Erreur : {e}")
-    if forecast_file:
-        st.info("Forecast.xlsx chargé — Jalon 1 sans priorité disponible")
-    if prio_file:
-        st.info("Prio.xlsx chargé — Jalon 1 avec priorité et Jalon 2 disponibles")
 
 
 # =============================================================================
@@ -468,10 +467,10 @@ with tab2:
                             consumed[ref] = round(qty)
                     cout_total = sum(qty * stock_optim.at[ref, 'Prix (pj)'] for ref, qty in consumed.items() if ref in stock_optim.index)
 
-                    demand_df['Qte produite'] = demand_df['Conf|version'].map(produced).fillna(0).astype(int)
-                    demand_df['Restant'] = demand_df['Demande'] - demand_df['Qte produite']
+                    demand_df['Qté produite'] = demand_df['Conf|version'].map(produced).fillna(0).astype(int)
+                    demand_df['Restant'] = demand_df['Demande'] - demand_df['Qté produite']
                     total_demande = demand_df['Demande'].sum()
-                    total_produit = demand_df['Qte produite'].sum()
+                    total_produit = demand_df['Qté produite'].sum()
                     pct = (total_produit / total_demande * 100) if total_demande > 0 else 0
                     nb_rupture = (demand_df['Restant'] > 0).sum()
                     val_manquante = (demand_df['Restant'] * demand_df['Prix'].fillna(0)).sum()
@@ -486,14 +485,14 @@ with tab2:
                     c1.metric("Demande totale", f"{int(total_demande)}")
                     c2.metric("Configurations produites", f"{int(total_produit)}")
                     c3.metric("Taux de réalisation", f"{pct:.1f}%")
-                    c4.metric("Valeur stock consommé", f"{cout_total:,.0f} €")
+                    c4.metric("Valeur stock consommé", f"{cout_total:,.0f} €".replace(',', ' '))
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     col_a, col_b = st.columns([3, 2])
                     with col_a:
                         st.markdown('<div class="kpi-label">Détail par configuration</div>', unsafe_allow_html=True)
-                        detail_df = demand_df[['Constructeur', 'Conf|version', 'Demande', 'Prix', 'Qte produite', 'Restant']].copy()
-                        detail_df['% Realise'] = (detail_df['Qte produite'] / detail_df['Demande'] * 100).round(1)
+                        detail_df = demand_df[['Constructeur', 'Conf|version', 'Demande', 'Prix', 'Qté produite', 'Restant']].copy()
+                        detail_df['% Réalisé'] = (detail_df['Qté produite'] / detail_df['Demande'] * 100).round(1)
                         st.dataframe(detail_df, use_container_width=True, height=350)
                     with col_b:
                         st.markdown('<div class="kpi-label">Top 10 références consommées</div>', unsafe_allow_html=True)
@@ -504,14 +503,14 @@ with tab2:
                             top_df = pd.DataFrame([{
                                 'Référence': r,
                                 'Quantité': int(q_),
-                                'Valeur (€)': f"{round(q_ * (stock_optim.at[r, 'Prix (pj)'] if r in stock_optim.index else 0)):,}"
+                                'Valeur (€)': f"{round(q_ * (stock_optim.at[r, 'Prix (pj)'] if r in stock_optim.index else 0)):,}".replace(',', ' ')
                             } for r, q_ in top_refs])
                             st.dataframe(top_df, use_container_width=True, height=350)
 
                     if 'Constructeur' in demand_df.columns:
                         st.markdown('<div class="kpi-label">Répartition par constructeur</div>', unsafe_allow_html=True)
                         constr = demand_df.groupby('Constructeur').agg(
-                            Demande=('Demande', 'sum'), Produit=('Qte produite', 'sum')
+                            Demande=('Demande', 'sum'), Produit=('Qté produite', 'sum')
                         ).reset_index()
                         constr['Restant'] = constr['Demande'] - constr['Produit']
                         constr['Taux %'] = (constr['Produit'] / constr['Demande'] * 100).round(1).astype(str) + '%'
@@ -528,8 +527,8 @@ with tab2:
                     _BB       = Font(bold=True, color="FFFFFF", size=11)
                     _BB14     = Font(bold=True, color="FFFFFF", size=14)
                     _BN       = Font(bold=True, size=11)
-                    _EUR      = '#,##0 €'
-                    _NUM      = '#,##0'
+                    _EUR      = '# ##0 €'
+                    _NUM      = '# ##0'
 
                     def _fmt_h(ws, c=None):
                         c = c or _BLEU
@@ -554,13 +553,13 @@ with tab2:
 
                     # ---- Onglet 1 : Demandes ----
                     ws_dem = wb_sp.active; ws_dem.title = "Demandes"
-                    cols_exp = [c for c in ['Constructeur','Conf','Version','Conf|version','Demande','Prix','Qte produite','Restant'] if c in demand_df.columns]
-                    df_exp = demand_df[cols_exp].sort_values('Constructeur') if 'Constructeur' in demand_df.columns else demand_df[cols_exp]
+                    cols_exp = [c for c in ['Constructeur','Conf','Version','Conf|version','Demande','Prix','Qté produite','Restant'] if c in demand_df.columns]
+                    df_exp = demand_df[cols_exp].sort_values('Conf|version')
                     for rr in dataframe_to_rows(df_exp, index=False, header=True): ws_dem.append(rr)
                     tot_row = ws_dem.max_row + 1
                     ws_dem.cell(tot_row, 1, "TOTAL")
                     cidx = {cols_exp[i]: i+1 for i in range(len(cols_exp))}
-                    for cn in ['Demande','Qte produite','Restant']:
+                    for cn in ['Demande','Qté produite','Restant']:
                         if cn in cidx: ws_dem.cell(tot_row, cidx[cn], df_exp[cn].sum())
                     _ligne_tot(ws_dem, tot_row, len(cols_exp))
                     _fmt_h(ws_dem); _adj_w(ws_dem)
@@ -568,7 +567,7 @@ with tab2:
                         for cell in row:
                             h = ws_dem.cell(1, cell.column).value
                             if h == 'Prix' and isinstance(cell.value, (int, float)): cell.number_format = _EUR
-                            elif h in ['Demande','Qte produite','Restant'] and isinstance(cell.value, (int, float)): cell.number_format = _NUM
+                            elif h in ['Demande','Qté produite','Restant'] and isinstance(cell.value, (int, float)): cell.number_format = _NUM
                     if 'Restant' in cidx:
                         for rn in range(2, ws_dem.max_row):
                             c = ws_dem.cell(rn, cidx['Restant'])
@@ -579,7 +578,7 @@ with tab2:
                     ws_bom = wb_sp.create_sheet("BOM")
                     bom_exp = bom_df[['Conf|version','Référence','Quantité']].copy()
                     bom_exp['Stock initial'] = bom_exp['Référence'].map(lambda r: stock_optim.at[r,'NVX STOCK'] if r in stock_optim.index else 0)
-                    bom_exp['Stock a consommer'] = bom_exp.apply(lambda row: produced.get(row['Conf|version'], 0) * row['Quantité'], axis=1)
+                    bom_exp['Stock à consommer'] = bom_exp.apply(lambda row: produced.get(row['Conf|version'], 0) * row['Quantité'], axis=1)
                     bom_exp['Stock final'] = bom_exp['Référence'].map(lambda r: (stock_optim.at[r,'NVX STOCK'] if r in stock_optim.index else 0) - consumed.get(r, 0))
                     bom_exp['Bloquant'] = bom_exp.apply(lambda row: 'Oui' if row['Stock final'] < row['Quantité'] else 'Non', axis=1)
                     bom_exp = bom_exp.sort_values(['Conf|version','Référence'])
@@ -595,9 +594,9 @@ with tab2:
                     # ---- Onglet 3 : Stock ----
                     ws_stk = wb_sp.create_sheet("Stock")
                     stk_out = stock_df.copy().rename(columns={'NVX STOCK':'Stock initial','Prix (pj)':'Prix unitaire'})
-                    stk_out['Consomme'] = stk_out['Referentiel'].map(consumed).fillna(0).round(2)
-                    stk_out['Stock final'] = (stk_out['Stock initial'] - stk_out['Consomme']).round(2)
-                    cols_stk = ['Referentiel','Stock initial','Prix unitaire','Consomme','Stock final']
+                    stk_out['Consommé'] = stk_out['Referentiel'].map(consumed).fillna(0).round(2)
+                    stk_out['Stock final'] = (stk_out['Stock initial'] - stk_out['Consommé']).round(2)
+                    cols_stk = ['Referentiel','Stock initial','Prix unitaire','Consommé','Stock final']
                     stk_out = stk_out[cols_stk].sort_values('Referentiel')
                     for rr in dataframe_to_rows(stk_out, index=False, header=True): ws_stk.append(rr)
                     _fmt_h(ws_stk); _adj_w(ws_stk)
@@ -633,26 +632,27 @@ with tab2:
                         elif isinstance(val, int): ws_res.cell(rr, 2).number_format = _NUM
                         rr += 1
                     rr += 1
-                    ws_res.cell(rr, 1, "DÉTAIL PAR CONF").font = _BB14
+                    ws_res.cell(rr, 1, "DÉTAIL PAR CONSTRUCTEUR / CONF").font = _BB14
                     for ci in range(1, 6): ws_res.cell(rr, ci).fill = _BLEU_F
                     rr += 1
-                    for i, h in enumerate(["Constructeur","Conf|version","Demande","Qte produite","Réalisation"], 1):
+                    for i, h in enumerate(["Constructeur","Conf","Demande","Qté produite","Réalisation"], 1):
                         ws_res.cell(rr, i, h).font = _BN; ws_res.cell(rr, i).fill = _BLEU_C
                         ws_res.cell(rr, i).alignment = Alignment(horizontal="center")
                     rr += 1
-                    recap = demand_df.groupby(['Constructeur','Conf|version'] if 'Constructeur' in demand_df.columns else ['Conf|version']).agg({'Demande':'sum','Qte produite':'sum'}).reset_index()
+                    recap = demand_df.groupby(['Constructeur','Conf'] if 'Constructeur' in demand_df.columns else ['Conf']).agg({'Demande':'sum','Qté produite':'sum'}).reset_index()
+                    recap = recap.sort_values(['Constructeur','Conf'] if 'Constructeur' in recap.columns else ['Conf'])
                     for _, row_data in recap.iterrows():
                         ws_res.cell(rr, 1, row_data.get('Constructeur',''))
-                        ws_res.cell(rr, 2, row_data['Conf|version'])
+                        ws_res.cell(rr, 2, row_data.get('Conf',''))
                         ws_res.cell(rr, 3, int(row_data['Demande'])).number_format = _NUM
-                        ws_res.cell(rr, 4, int(row_data['Qte produite'])).number_format = _NUM
-                        real_pct = row_data['Qte produite'] / row_data['Demande'] * 100 if row_data['Demande'] > 0 else 0
+                        ws_res.cell(rr, 4, int(row_data['Qté produite'])).number_format = _NUM
+                        real_pct = row_data['Qté produite'] / row_data['Demande'] * 100 if row_data['Demande'] > 0 else 0
                         ws_res.cell(rr, 5, f"{real_pct:.1f}%").alignment = Alignment(horizontal="center")
-                        if row_data['Qte produite'] == row_data['Demande']: ws_res.cell(rr, 5).fill = _VERT
-                        elif row_data['Qte produite'] == 0: ws_res.cell(rr, 5).fill = _ROUGE
+                        if row_data['Qté produite'] == row_data['Demande']: ws_res.cell(rr, 5).fill = _VERT
+                        elif row_data['Qté produite'] == 0: ws_res.cell(rr, 5).fill = _ROUGE
                         else: ws_res.cell(rr, 5).fill = _ORANGE
                         rr += 1
-                    for cl, w in [('A',22),('B',22),('C',14),('D',16),('E',14)]: ws_res.column_dimensions[cl].width = w
+                    for cl, w in [('A',18),('B',14),('C',14),('D',16),('E',14)]: ws_res.column_dimensions[cl].width = w
 
                     out_sp = BytesIO(); wb_sp.save(out_sp)
                     ts_sp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -681,9 +681,9 @@ with tab2:
 # =============================================================================
 with tab3:
     st.markdown('<div class="section-title">Jalon 1 — Avec Priorité</div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-sub">Optimisation séquentielle respectant l\'ordre des priorités.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-sub">Maximise le nombre total de configurations avec le stock disponible, tout en respectant l\'ordre des priorités.</div>', unsafe_allow_html=True)
     st.markdown("""<div class="info-block">
-        <strong style="color:#FFFFFF;">Méthode séquentielle</strong><br>
+        <strong style="color:#FFFFFF;">Méthode séquentielle en 2 étapes</strong><br>
         Chaque niveau de priorité est traité indépendamment.<br>
         Le stock est consommé progressivement de la priorité la plus haute à la plus basse.
     </div>""", unsafe_allow_html=True)
@@ -750,7 +750,7 @@ with tab3:
                     c1.metric("Demande totale", f"{int(total_demande)}")
                     c2.metric("Configurations produites", f"{int(total_j1)}")
                     c3.metric("Taux de réalisation", f"{pct_j1:.1f}%")
-                    c4.metric("Valeur stock consommé", f"{cout_j1:,.0f} €")
+                    c4.metric("Valeur stock consommé", f"{cout_j1:,.0f} €".replace(',', ' '))
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     if 'Constructeur' in all_demands.columns:
@@ -772,8 +772,8 @@ with tab3:
                     _BB2     = Font(bold=True, color="FFFFFF", size=11)
                     _BB142   = Font(bold=True, color="FFFFFF", size=14)
                     _BN2     = Font(bold=True, size=11)
-                    _EUR2    = '#,##0 €'
-                    _NUM2    = '#,##0'
+                    _EUR2    = '# ##0 €'
+                    _NUM2    = '# ##0'
 
                     def _fmt_h2(ws, c=None):
                         c = c or _BLEU2
@@ -829,7 +829,7 @@ with tab3:
                         produced_total_j1[cv] = produced_total_j1.get(cv, 0) + qty
                     bom_exp2 = bom_df[['Conf|version','Référence','Quantité']].copy()
                     bom_exp2['Stock initial'] = bom_exp2['Référence'].map(lambda r: stock_optim.at[r,'NVX STOCK'] if r in stock_optim.index else 0)
-                    bom_exp2['Stock a consommer'] = bom_exp2.apply(lambda row: produced_total_j1.get(row['Conf|version'], 0) * row['Quantité'], axis=1)
+                    bom_exp2['Stock à consommer'] = bom_exp2.apply(lambda row: produced_total_j1.get(row['Conf|version'], 0) * row['Quantité'], axis=1)
                     bom_exp2['Stock final'] = bom_exp2['Référence'].map(lambda r: (stock_optim.at[r,'NVX STOCK'] if r in stock_optim.index else 0) - consumed_j1.get(r, 0))
                     bom_exp2['Bloquant'] = bom_exp2.apply(lambda row: 'Oui' if row['Stock final'] < row['Quantité'] else 'Non', axis=1)
                     bom_exp2 = bom_exp2.sort_values(['Conf|version','Référence'])
@@ -845,9 +845,9 @@ with tab3:
                     # ---- Onglet 3 : Stock ----
                     ws_stk2 = wb_ap.create_sheet("Stock")
                     stk_out2 = stock_df.copy().rename(columns={'NVX STOCK':'Stock initial','Prix (pj)':'Prix unitaire'})
-                    stk_out2['Consomme'] = stk_out2['Referentiel'].map(consumed_j1).fillna(0).round(2)
-                    stk_out2['Stock final'] = (stk_out2['Stock initial'] - stk_out2['Consomme']).round(2)
-                    cols_stk2 = ['Referentiel','Stock initial','Prix unitaire','Consomme','Stock final']
+                    stk_out2['Consommé'] = stk_out2['Referentiel'].map(consumed_j1).fillna(0).round(2)
+                    stk_out2['Stock final'] = (stk_out2['Stock initial'] - stk_out2['Consommé']).round(2)
+                    cols_stk2 = ['Referentiel','Stock initial','Prix unitaire','Consommé','Stock final']
                     stk_out2 = stk_out2[cols_stk2].sort_values('Referentiel')
                     for rr in dataframe_to_rows(stk_out2, index=False, header=True): ws_stk2.append(rr)
                     _fmt_h2(ws_stk2); _adj_w2(ws_stk2)
@@ -943,11 +943,11 @@ with tab3:
 # =============================================================================
 with tab4:
     st.markdown('<div class="section-title">Jalon 2 — Optimisation Complète</div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-sub">Jalon 1 + achats de références pour maximiser la production.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-sub">Jalon 1 (stock existant) + Jalon 2 (achat de références manquantes).</div>', unsafe_allow_html=True)
     st.markdown("""<div class="info-block">
-        <strong style="color:#FFFFFF;">Méthode en 2 phases</strong><br>
-        1. Jalon 1 : maximisation avec le stock disponible (par priorité)<br>
-        2. Jalon 2 : achat de références manquantes par seuils (20% → 40% → 60% → 80% du prix config)
+        <strong style="color:#FFFFFF;">Méthode en 2 étapes</strong><br>
+        1. Jalon 1 : maximisation avec le stock disponible<br>
+        2. Jalon 2 : achat de références par seuils de coût (20% → 40% → 60% → 80% du prix configuration)
     </div>""", unsafe_allow_html=True)
 
     if not st.session_state.get('data_prepared'):
@@ -1164,7 +1164,7 @@ with tab4:
                         j2_cout_par_seuil[seuil_pct] = cout_seuil
 
                     progress_bar.progress(1.0)
-                    status_text.text("Terminé")
+                    status_text.text("Optimisation terminée")
 
                     total_j2 = sum(j2_prod_par_seuil.values())
                     total_produit = total_j1 + total_j2
@@ -1188,22 +1188,22 @@ with tab4:
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown('<div class="kpi-label">Décomposition des coûts</div>', unsafe_allow_html=True)
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Stock consommé J1", f"{cout_j1:,.0f} €")
-                    c2.metric("Achats références J2", f"{cout_achats_j2:,.0f} €")
-                    c3.metric("Configs restantes (estimé)", f"{cout_conf_restantes:,.0f} €")
-                    c4.metric("Coût total estimé", f"{cout_total_estime:,.0f} €")
+                    c1.metric("Stock consommé J1", f"{cout_j1:,.0f} €".replace(',', ' '))
+                    c2.metric("Achats références J2", f"{cout_achats_j2:,.0f} €".replace(',', ' '))
+                    c3.metric("Configs restantes (estimé)", f"{cout_conf_restantes:,.0f} €".replace(',', ' '))
+                    c4.metric("Coût total estimé", f"{cout_total_estime:,.0f} €".replace(',', ' '))
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown('<div class="kpi-label">Production cumulée par seuil</div>', unsafe_allow_html=True)
                     cumul = total_j1
                     seuil_rows = [{'Etape': 'Jalon 1 — stock existant', 'Nouvelles configs': int(total_j1),
-                                   'Cout (EUR)': f"{cout_j1:,.0f}", 'Cumul': int(total_j1), 'Taux': f"{pct_j1:.1f}%"}]
+                                   'Cout (EUR)': f"{cout_j1:,.0f}".replace(',', ' '), 'Cumul': int(total_j1), 'Taux': f"{pct_j1:.1f}%"}]
                     for s_pct in [20, 40, 60, 80]:
                         prod = j2_prod_par_seuil.get(s_pct, 0)
                         cout = j2_cout_par_seuil.get(s_pct, 0)
                         cumul += prod
                         seuil_rows.append({'Etape': f'Seuil {s_pct}%', 'Nouvelles configs': int(prod),
-                                           'Cout (EUR)': f"{cout:,.0f}", 'Cumul': int(cumul),
+                                           'Cout (EUR)': f"{cout:,.0f}".replace(',', ' '), 'Cumul': int(cumul),
                                            'Taux': f"{(cumul/total_demande*100):.1f}%"})
                     st.dataframe(pd.DataFrame(seuil_rows), use_container_width=True)
 
@@ -1300,8 +1300,8 @@ with tab4:
                     BOLD_BLANC_14= Font(bold=True, color="FFFFFF", size=14)
                     BOLD_BLANC_12= Font(bold=True, color="FFFFFF", size=12)
                     BOLD_NOIR    = Font(bold=True, size=11)
-                    EURO_FMT = '#,##0 €'
-                    NUM_FMT  = '#,##0'
+                    EURO_FMT = '# ##0 €'
+                    NUM_FMT  = '# ##0'
 
                     def fmt_h(ws, c=None):
                         c = c or BLEU
@@ -1588,7 +1588,8 @@ with tab4:
                         df_dj2['Budget max'] = df_dj2.apply(
                             lambda row: (int(row['Seuil'].replace('%','')) / 100) * row['Prix conf'] if pd.notna(row.get('Prix conf')) else None, axis=1)
                         df_dj2 = df_dj2.rename(columns={'Nb produit': 'Produit', 'Prix conf': 'Prix config'})
-                        cols_dj2 = [c for c in ['Seuil','Priorité','Conf|version','Demande restante','Produit','Budget max','Cout achat','% du prix','Statut'] if c in df_dj2.columns]
+                        df_dj2['Restant apres'] = (df_dj2['Demande restante'].fillna(0) - df_dj2['Produit'].fillna(0)).astype(int)
+                        cols_dj2 = [c for c in ['Seuil','Priorité','Conf|version','Demande restante','Produit','Restant apres','Prix config','Budget max','Cout achat','% du prix','Statut'] if c in df_dj2.columns]
                         df_dj2 = df_dj2[cols_dj2].sort_values(['Seuil','Priorité','Conf|version'])
                         for rr in dataframe_to_rows(df_dj2, index=False, header=True): ws_j2.append(rr)
                         tot_dj2 = ws_j2.max_row + 1
