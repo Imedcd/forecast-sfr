@@ -517,24 +517,143 @@ with tab2:
                         constr['Taux %'] = (constr['Produit'] / constr['Demande'] * 100).round(1).astype(str) + '%'
                         st.dataframe(constr, use_container_width=True)
 
-                    # Export Excel
-                    def fmt_h(ws):
+                    # Export Excel - 4 onglets identiques au script standalone
+                    _BLEU     = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+                    _BLEU_C   = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
+                    _VERT     = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+                    _ORANGE   = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+                    _ROUGE    = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+                    _GRIS     = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+                    _BLEU_F   = PatternFill(start_color="1F3864", end_color="1F3864", fill_type="solid")
+                    _BB       = Font(bold=True, color="FFFFFF", size=11)
+                    _BB14     = Font(bold=True, color="FFFFFF", size=14)
+                    _BN       = Font(bold=True, size=11)
+                    _EUR      = '#,##0 €'
+                    _NUM      = '#,##0'
+
+                    def _fmt_h(ws, c=None):
+                        c = c or _BLEU
                         for cell in ws[1]:
-                            cell.font = Font(bold=True, color="FFFFFF")
-                            cell.fill = PatternFill("solid", fgColor="1F4E79")
-                            cell.alignment = Alignment(horizontal="center")
-                    def adj_w(ws):
+                            cell.font = _BB; cell.fill = c
+                            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                        ws.freeze_panes = "A2"; ws.row_dimensions[1].height = 30
+                        from openpyxl.utils import get_column_letter
+                        ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
+
+                    def _adj_w(ws):
                         for col in ws.columns:
-                            ws.column_dimensions[col[0].column_letter].width = max(
-                                (len(str(c.value)) for c in col if c.value), default=10) + 2
+                            ml = max((len(str(c.value or "")) for c in col), default=8)
+                            ws.column_dimensions[col[0].column_letter].width = min(ml + 4, 45)
+
+                    def _ligne_tot(ws, row_num, nb_cols):
+                        for ci in range(1, nb_cols+1):
+                            ws.cell(row=row_num, column=ci).font = _BN
+                            ws.cell(row=row_num, column=ci).fill = _GRIS
+
                     wb_sp = Workbook()
-                    ws_res = wb_sp.active; ws_res.title = "Résultat J1"
-                    for r in dataframe_to_rows(detail_df, index=False, header=True): ws_res.append(r)
-                    fmt_h(ws_res); adj_w(ws_res)
-                    if 'Constructeur' in demand_df.columns:
-                        ws_c = wb_sp.create_sheet("Par Constructeur")
-                        for r in dataframe_to_rows(constr, index=False, header=True): ws_c.append(r)
-                        fmt_h(ws_c); adj_w(ws_c)
+
+                    # ---- Onglet 1 : Demandes ----
+                    ws_dem = wb_sp.active; ws_dem.title = "Demandes"
+                    cols_exp = [c for c in ['Constructeur','Conf','Version','Conf|version','Demande','Prix','Qte produite','Restant'] if c in demand_df.columns]
+                    df_exp = demand_df[cols_exp].sort_values('Constructeur') if 'Constructeur' in demand_df.columns else demand_df[cols_exp]
+                    for rr in dataframe_to_rows(df_exp, index=False, header=True): ws_dem.append(rr)
+                    tot_row = ws_dem.max_row + 1
+                    ws_dem.cell(tot_row, 1, "TOTAL")
+                    cidx = {cols_exp[i]: i+1 for i in range(len(cols_exp))}
+                    for cn in ['Demande','Qte produite','Restant']:
+                        if cn in cidx: ws_dem.cell(tot_row, cidx[cn], df_exp[cn].sum())
+                    _ligne_tot(ws_dem, tot_row, len(cols_exp))
+                    _fmt_h(ws_dem); _adj_w(ws_dem)
+                    for row in ws_dem.iter_rows(min_row=2, max_row=ws_dem.max_row):
+                        for cell in row:
+                            h = ws_dem.cell(1, cell.column).value
+                            if h == 'Prix' and isinstance(cell.value, (int, float)): cell.number_format = _EUR
+                            elif h in ['Demande','Qte produite','Restant'] and isinstance(cell.value, (int, float)): cell.number_format = _NUM
+                    if 'Restant' in cidx:
+                        for rn in range(2, ws_dem.max_row):
+                            c = ws_dem.cell(rn, cidx['Restant'])
+                            if isinstance(c.value, (int, float)):
+                                c.fill = _VERT if c.value == 0 else _ORANGE if c.value > 0 else c.fill
+
+                    # ---- Onglet 2 : BOM ----
+                    ws_bom = wb_sp.create_sheet("BOM")
+                    bom_exp = bom_df[['Conf|version','Référence','Quantité']].copy()
+                    bom_exp['Stock initial'] = bom_exp['Référence'].map(lambda r: stock_optim.at[r,'NVX STOCK'] if r in stock_optim.index else 0)
+                    bom_exp['Stock a consommer'] = bom_exp.apply(lambda row: produced.get(row['Conf|version'], 0) * row['Quantité'], axis=1)
+                    bom_exp['Stock final'] = bom_exp['Référence'].map(lambda r: (stock_optim.at[r,'NVX STOCK'] if r in stock_optim.index else 0) - consumed.get(r, 0))
+                    bom_exp['Bloquant'] = bom_exp.apply(lambda row: 'Oui' if row['Stock final'] < row['Quantité'] else 'Non', axis=1)
+                    bom_exp = bom_exp.sort_values(['Conf|version','Référence'])
+                    for rr in dataframe_to_rows(bom_exp, index=False, header=True): ws_bom.append(rr)
+                    _fmt_h(ws_bom); _adj_w(ws_bom)
+                    col_bl = list(bom_exp.columns).index('Bloquant') + 1
+                    col_sf = list(bom_exp.columns).index('Stock final') + 1
+                    for rn in range(2, ws_bom.max_row + 1):
+                        cb = ws_bom.cell(rn, col_bl); csf = ws_bom.cell(rn, col_sf)
+                        if cb.value == 'Oui': cb.fill = _ROUGE; csf.fill = _ROUGE
+                        else: cb.fill = _VERT
+
+                    # ---- Onglet 3 : Stock ----
+                    ws_stk = wb_sp.create_sheet("Stock")
+                    stk_out = stock_df.copy().rename(columns={'NVX STOCK':'Stock initial','Prix (pj)':'Prix unitaire'})
+                    stk_out['Consomme'] = stk_out['Referentiel'].map(consumed).fillna(0).round(2)
+                    stk_out['Stock final'] = (stk_out['Stock initial'] - stk_out['Consomme']).round(2)
+                    cols_stk = ['Referentiel','Stock initial','Prix unitaire','Consomme','Stock final']
+                    stk_out = stk_out[cols_stk].sort_values('Referentiel')
+                    for rr in dataframe_to_rows(stk_out, index=False, header=True): ws_stk.append(rr)
+                    _fmt_h(ws_stk); _adj_w(ws_stk)
+                    for row in ws_stk.iter_rows(min_row=2, max_row=ws_stk.max_row):
+                        for cell in row:
+                            if ws_stk.cell(1, cell.column).value == 'Prix unitaire' and isinstance(cell.value, (int, float)): cell.number_format = _EUR
+                    col_sf2 = cols_stk.index('Stock final') + 1
+                    for rn in range(2, ws_stk.max_row + 1):
+                        c = ws_stk.cell(rn, col_sf2)
+                        if isinstance(c.value, (int, float)):
+                            if c.value < 0: c.fill = _ROUGE
+                            elif c.value == 0: c.fill = _ORANGE
+
+                    # ---- Onglet 4 : Résultats ----
+                    ws_res = wb_sp.create_sheet("Résultats")
+                    rr = 1
+                    ws_res.cell(rr, 1, "RÉCAPITULATIF GLOBAL").font = _BB14
+                    for ci in range(1, 3): ws_res.cell(rr, ci).fill = _BLEU_F
+                    rr = 3
+                    cout_stk_init = float((stock_optim['NVX STOCK'] * stock_optim['Prix (pj)']).sum())
+                    cout_stk_fin = cout_stk_init - cout_total
+                    for lbl, val in [
+                        ("Total demande", int(total_demande)),
+                        ("Total produit", int(total_produit)),
+                        ("% Réalisation", f"{pct:.1f}%"),
+                        ("Restant", int(total_demande - total_produit)),
+                        ("Stock initial (EUR)", round(cout_stk_init, 2)),
+                        ("Stock consommé (EUR)", round(cout_total, 2)),
+                        ("Stock final (EUR)", round(cout_stk_fin, 2)),
+                    ]:
+                        ws_res.cell(rr, 1, lbl); ws_res.cell(rr, 2, val)
+                        if isinstance(val, (int, float)) and "EUR" in lbl: ws_res.cell(rr, 2).number_format = _EUR
+                        elif isinstance(val, int): ws_res.cell(rr, 2).number_format = _NUM
+                        rr += 1
+                    rr += 1
+                    ws_res.cell(rr, 1, "DÉTAIL PAR CONF").font = _BB14
+                    for ci in range(1, 6): ws_res.cell(rr, ci).fill = _BLEU_F
+                    rr += 1
+                    for i, h in enumerate(["Constructeur","Conf|version","Demande","Qte produite","Réalisation"], 1):
+                        ws_res.cell(rr, i, h).font = _BN; ws_res.cell(rr, i).fill = _BLEU_C
+                        ws_res.cell(rr, i).alignment = Alignment(horizontal="center")
+                    rr += 1
+                    recap = demand_df.groupby(['Constructeur','Conf|version'] if 'Constructeur' in demand_df.columns else ['Conf|version']).agg({'Demande':'sum','Qte produite':'sum'}).reset_index()
+                    for _, row_data in recap.iterrows():
+                        ws_res.cell(rr, 1, row_data.get('Constructeur',''))
+                        ws_res.cell(rr, 2, row_data['Conf|version'])
+                        ws_res.cell(rr, 3, int(row_data['Demande'])).number_format = _NUM
+                        ws_res.cell(rr, 4, int(row_data['Qte produite'])).number_format = _NUM
+                        real_pct = row_data['Qte produite'] / row_data['Demande'] * 100 if row_data['Demande'] > 0 else 0
+                        ws_res.cell(rr, 5, f"{real_pct:.1f}%").alignment = Alignment(horizontal="center")
+                        if row_data['Qte produite'] == row_data['Demande']: ws_res.cell(rr, 5).fill = _VERT
+                        elif row_data['Qte produite'] == 0: ws_res.cell(rr, 5).fill = _ROUGE
+                        else: ws_res.cell(rr, 5).fill = _ORANGE
+                        rr += 1
+                    for cl, w in [('A',22),('B',22),('C',14),('D',16),('E',14)]: ws_res.column_dimensions[cl].width = w
+
                     out_sp = BytesIO(); wb_sp.save(out_sp)
                     ts_sp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     st.session_state['j1_sp_excel'] = out_sp.getvalue()
@@ -642,21 +761,150 @@ with tab3:
                         constr_detail = constr_detail.sort_values(['Constructeur', 'Priorité'])
                         st.dataframe(constr_detail, use_container_width=True)
 
-                    # Export Excel
-                    def fmt_h2(ws):
+                    # Export Excel - 4 onglets identiques au script standalone
+                    _BLEU2   = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+                    _BLEU_C2 = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
+                    _VERT2   = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+                    _ORANGE2 = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+                    _ROUGE2  = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+                    _GRIS2   = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+                    _BLEU_F2 = PatternFill(start_color="1F3864", end_color="1F3864", fill_type="solid")
+                    _BB2     = Font(bold=True, color="FFFFFF", size=11)
+                    _BB142   = Font(bold=True, color="FFFFFF", size=14)
+                    _BN2     = Font(bold=True, size=11)
+                    _EUR2    = '#,##0 €'
+                    _NUM2    = '#,##0'
+
+                    def _fmt_h2(ws, c=None):
+                        c = c or _BLEU2
                         for cell in ws[1]:
-                            cell.font = Font(bold=True, color="FFFFFF")
-                            cell.fill = PatternFill("solid", fgColor="1F4E79")
-                            cell.alignment = Alignment(horizontal="center")
-                    def adj_w2(ws):
+                            cell.font = _BB2; cell.fill = c
+                            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                        ws.freeze_panes = "A2"; ws.row_dimensions[1].height = 30
+                        from openpyxl.utils import get_column_letter
+                        ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
+
+                    def _adj_w2(ws):
                         for col in ws.columns:
-                            ws.column_dimensions[col[0].column_letter].width = max(
-                                (len(str(c.value)) for c in col if c.value), default=10) + 2
+                            ml = max((len(str(c.value or "")) for c in col), default=8)
+                            ws.column_dimensions[col[0].column_letter].width = min(ml + 4, 45)
+
+                    def _ligne_tot2(ws, row_num, nb_cols):
+                        for ci in range(1, nb_cols+1):
+                            ws.cell(row=row_num, column=ci).font = _BN2
+                            ws.cell(row=row_num, column=ci).fill = _GRIS2
+
                     wb_ap = Workbook()
-                    ws_ap = wb_ap.active; ws_ap.title = "Détail par Constructeur"
-                    if 'Constructeur' in all_demands.columns:
-                        for r in dataframe_to_rows(constr_detail, index=False, header=True): ws_ap.append(r)
-                    fmt_h2(ws_ap); adj_w2(ws_ap)
+
+                    # Préparer un df export avec colonnes renommées
+                    df_ap_exp = all_demands.rename(columns={'J1 produit': 'Qté produite', 'Restant J1': 'Restant'})
+
+                    # ---- Onglet 1 : Demandes ----
+                    ws_dem2 = wb_ap.active; ws_dem2.title = "Demandes"
+                    cols_exp2 = [c for c in ['Constructeur','Conf','Version','Conf|version','Priorité','Demande','Prix','Qté produite','Restant'] if c in df_ap_exp.columns]
+                    df_exp2 = df_ap_exp[cols_exp2].sort_values(['Constructeur','Priorité'] if 'Constructeur' in df_ap_exp.columns else ['Priorité'])
+                    for rr in dataframe_to_rows(df_exp2, index=False, header=True): ws_dem2.append(rr)
+                    tot_row2 = ws_dem2.max_row + 1
+                    ws_dem2.cell(tot_row2, 1, "TOTAL")
+                    cidx2 = {cols_exp2[i]: i+1 for i in range(len(cols_exp2))}
+                    for cn in ['Demande','Qté produite','Restant']:
+                        if cn in cidx2: ws_dem2.cell(tot_row2, cidx2[cn], df_exp2[cn].sum())
+                    _ligne_tot2(ws_dem2, tot_row2, len(cols_exp2))
+                    _fmt_h2(ws_dem2); _adj_w2(ws_dem2)
+                    for row in ws_dem2.iter_rows(min_row=2, max_row=ws_dem2.max_row):
+                        for cell in row:
+                            h = ws_dem2.cell(1, cell.column).value
+                            if h == 'Prix' and isinstance(cell.value, (int, float)): cell.number_format = _EUR2
+                            elif h in ['Demande','Qté produite','Restant'] and isinstance(cell.value, (int, float)): cell.number_format = _NUM2
+                    if 'Restant' in cidx2:
+                        for rn in range(2, ws_dem2.max_row):
+                            c = ws_dem2.cell(rn, cidx2['Restant'])
+                            if isinstance(c.value, (int, float)):
+                                c.fill = _VERT2 if c.value == 0 else _ORANGE2 if c.value > 0 else c.fill
+
+                    # ---- Onglet 2 : BOM ----
+                    ws_bom2 = wb_ap.create_sheet("BOM")
+                    produced_total_j1 = {}
+                    for (cv, p_), qty in produced_j1.items():
+                        produced_total_j1[cv] = produced_total_j1.get(cv, 0) + qty
+                    bom_exp2 = bom_df[['Conf|version','Référence','Quantité']].copy()
+                    bom_exp2['Stock initial'] = bom_exp2['Référence'].map(lambda r: stock_optim.at[r,'NVX STOCK'] if r in stock_optim.index else 0)
+                    bom_exp2['Stock a consommer'] = bom_exp2.apply(lambda row: produced_total_j1.get(row['Conf|version'], 0) * row['Quantité'], axis=1)
+                    bom_exp2['Stock final'] = bom_exp2['Référence'].map(lambda r: (stock_optim.at[r,'NVX STOCK'] if r in stock_optim.index else 0) - consumed_j1.get(r, 0))
+                    bom_exp2['Bloquant'] = bom_exp2.apply(lambda row: 'Oui' if row['Stock final'] < row['Quantité'] else 'Non', axis=1)
+                    bom_exp2 = bom_exp2.sort_values(['Conf|version','Référence'])
+                    for rr in dataframe_to_rows(bom_exp2, index=False, header=True): ws_bom2.append(rr)
+                    _fmt_h2(ws_bom2); _adj_w2(ws_bom2)
+                    col_bl2 = list(bom_exp2.columns).index('Bloquant') + 1
+                    col_sf2b = list(bom_exp2.columns).index('Stock final') + 1
+                    for rn in range(2, ws_bom2.max_row + 1):
+                        cb = ws_bom2.cell(rn, col_bl2); csf = ws_bom2.cell(rn, col_sf2b)
+                        if cb.value == 'Oui': cb.fill = _ROUGE2; csf.fill = _ROUGE2
+                        else: cb.fill = _VERT2
+
+                    # ---- Onglet 3 : Stock ----
+                    ws_stk2 = wb_ap.create_sheet("Stock")
+                    stk_out2 = stock_df.copy().rename(columns={'NVX STOCK':'Stock initial','Prix (pj)':'Prix unitaire'})
+                    stk_out2['Consomme'] = stk_out2['Referentiel'].map(consumed_j1).fillna(0).round(2)
+                    stk_out2['Stock final'] = (stk_out2['Stock initial'] - stk_out2['Consomme']).round(2)
+                    cols_stk2 = ['Referentiel','Stock initial','Prix unitaire','Consomme','Stock final']
+                    stk_out2 = stk_out2[cols_stk2].sort_values('Referentiel')
+                    for rr in dataframe_to_rows(stk_out2, index=False, header=True): ws_stk2.append(rr)
+                    _fmt_h2(ws_stk2); _adj_w2(ws_stk2)
+                    for row in ws_stk2.iter_rows(min_row=2, max_row=ws_stk2.max_row):
+                        for cell in row:
+                            if ws_stk2.cell(1, cell.column).value == 'Prix unitaire' and isinstance(cell.value, (int, float)): cell.number_format = _EUR2
+                    col_sf2c = cols_stk2.index('Stock final') + 1
+                    for rn in range(2, ws_stk2.max_row + 1):
+                        c = ws_stk2.cell(rn, col_sf2c)
+                        if isinstance(c.value, (int, float)):
+                            if c.value < 0: c.fill = _ROUGE2
+                            elif c.value == 0: c.fill = _ORANGE2
+
+                    # ---- Onglet 4 : Résultats ----
+                    ws_res2 = wb_ap.create_sheet("Résultats")
+                    rr2 = 1
+                    ws_res2.cell(rr2, 1, "RÉCAPITULATIF GLOBAL").font = _BB142
+                    for ci in range(1, 3): ws_res2.cell(rr2, ci).fill = _BLEU_F2
+                    rr2 = 3
+                    cout_stk_init2 = float((stock_optim['NVX STOCK'] * stock_optim['Prix (pj)']).sum())
+                    cout_stk_fin2 = cout_stk_init2 - cout_j1
+                    for lbl, val in [
+                        ("Total demande", int(total_demande)),
+                        ("Total produit", int(total_j1)),
+                        ("% Réalisation", f"{pct_j1:.1f}%"),
+                        ("Restant", int(total_demande - total_j1)),
+                        ("Stock initial (EUR)", round(cout_stk_init2, 2)),
+                        ("Stock consommé (EUR)", round(cout_j1, 2)),
+                        ("Stock final (EUR)", round(cout_stk_fin2, 2)),
+                    ]:
+                        ws_res2.cell(rr2, 1, lbl); ws_res2.cell(rr2, 2, val)
+                        if isinstance(val, (int, float)) and "EUR" in lbl: ws_res2.cell(rr2, 2).number_format = _EUR2
+                        elif isinstance(val, int): ws_res2.cell(rr2, 2).number_format = _NUM2
+                        rr2 += 1
+                    rr2 += 1
+                    ws_res2.cell(rr2, 1, "DÉTAIL PAR CONSTRUCTEUR / CONF").font = _BB142
+                    for ci in range(1, 6): ws_res2.cell(rr2, ci).fill = _BLEU_F2
+                    rr2 += 1
+                    for i, h in enumerate(["Constructeur","Conf","Demande","Qté produite","Réalisation"], 1):
+                        ws_res2.cell(rr2, i, h).font = _BN2; ws_res2.cell(rr2, i).fill = _BLEU_C2
+                        ws_res2.cell(rr2, i).alignment = Alignment(horizontal="center")
+                    rr2 += 1
+                    recap2 = df_ap_exp.groupby(['Constructeur','Conf'] if 'Constructeur' in df_ap_exp.columns else ['Conf']).agg({'Demande':'sum','Qté produite':'sum'}).reset_index()
+                    recap2 = recap2.sort_values(['Constructeur','Conf'] if 'Constructeur' in recap2.columns else ['Conf'])
+                    for _, row_data in recap2.iterrows():
+                        ws_res2.cell(rr2, 1, row_data.get('Constructeur',''))
+                        ws_res2.cell(rr2, 2, row_data.get('Conf',''))
+                        ws_res2.cell(rr2, 3, int(row_data['Demande'])).number_format = _NUM2
+                        ws_res2.cell(rr2, 4, int(row_data['Qté produite'])).number_format = _NUM2
+                        real_pct2 = row_data['Qté produite'] / row_data['Demande'] * 100 if row_data['Demande'] > 0 else 0
+                        ws_res2.cell(rr2, 5, f"{real_pct2:.1f}%").alignment = Alignment(horizontal="center")
+                        if row_data['Qté produite'] == row_data['Demande']: ws_res2.cell(rr2, 5).fill = _VERT2
+                        elif row_data['Qté produite'] == 0: ws_res2.cell(rr2, 5).fill = _ROUGE2
+                        else: ws_res2.cell(rr2, 5).fill = _ORANGE2
+                        rr2 += 1
+                    for cl, w in [('A',18),('B',14),('C',14),('D',16),('E',14)]: ws_res2.column_dimensions[cl].width = w
+
                     out_ap = BytesIO(); wb_ap.save(out_ap)
                     ts_ap = datetime.now().strftime("%Y%m%d_%H%M%S")
                     st.session_state['j1_ap_excel'] = out_ap.getvalue()
@@ -793,6 +1041,7 @@ with tab4:
                     consumed_j2 = {}
                     j2_prod_par_seuil = {}
                     j2_cout_par_seuil = {}
+                    achats_detail_par_config = {}
 
                     progress_bar = st.progress(0)
                     status_text = st.empty()
@@ -881,6 +1130,7 @@ with tab4:
                                     restant[(cv, prio)] -= qty
                                     total_seuil += qty
                                     cout_seuil += cout_achat_cv
+                                    refs_list = []
                                     for ref in bom_par_config[cv]:
                                         if (cv, ref) in S2:
                                             used = round(lp_val(S2[(cv, ref)]), 4)
@@ -891,6 +1141,11 @@ with tab4:
                                             bought = round(lp_val(B2[(cv, ref)]), 4)
                                             if bought > 0:
                                                 achats_j2[ref] = achats_j2.get(ref, 0) + bought
+                                                prix_ref = ref_to_prix.get(ref, 0)
+                                                refs_list.append({'Reference': ref, 'Qte achetee': bought,
+                                                                  'Prix unitaire': prix_ref, 'Cout total': round(bought * prix_ref, 2)})
+                                    if refs_list:
+                                        achats_detail_par_config[(cv, prio, seuil_pct)] = {'nb_configs': qty, 'references': refs_list}
                                     detail_j2.append({'Seuil': f"{seuil_pct}%", 'Priorité': prio, 'Conf|version': cv,
                                                       'Nb produit': qty, 'Demande restante': demand_prio[cv],
                                                       'Prix conf': prix_configs[cv], 'Cout achat': round(cout_achat_cv, 2),
@@ -1029,33 +1284,43 @@ with tab4:
                         if not df_j2_prod.empty:
                             st.dataframe(df_j2_prod[['Seuil','Priorité','Conf|version','Nb produit','Prix conf','Cout achat','% du prix']], use_container_width=True, height=300)
 
-                    # ---- EXPORT EXCEL ----
+                    # ---- EXPORT EXCEL - 5 onglets identiques au script standalone ----
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown('<div class="kpi-label">Export des résultats</div>', unsafe_allow_html=True)
 
-                    BLEU = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-                    BLEU_CLAIR = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
-                    VERT = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-                    ORANGE = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
-                    ROUGE = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-                    GRIS = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
-                    BLEU_FONCE = PatternFill(start_color="1F3864", end_color="1F3864", fill_type="solid")
-                    BOLD_BLANC = Font(bold=True, color="FFFFFF", size=11)
-                    BOLD_BLANC_14 = Font(bold=True, color="FFFFFF", size=14)
-                    BOLD_NOIR = Font(bold=True, size=11)
+                    BLEU      = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+                    BLEU_CLAIR= PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
+                    VERT      = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+                    ORANGE    = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+                    ROUGE     = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+                    GRIS      = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+                    BLEU_FONCE= PatternFill(start_color="1F3864", end_color="1F3864", fill_type="solid")
+                    JAUNE     = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+                    BOLD_BLANC   = Font(bold=True, color="FFFFFF", size=11)
+                    BOLD_BLANC_14= Font(bold=True, color="FFFFFF", size=14)
+                    BOLD_BLANC_12= Font(bold=True, color="FFFFFF", size=12)
+                    BOLD_NOIR    = Font(bold=True, size=11)
                     EURO_FMT = '#,##0 €'
-                    NUM_FMT = '#,##0'
+                    NUM_FMT  = '#,##0'
 
-                    def fmt_h(ws, c=BLEU):
+                    def fmt_h(ws, c=None):
+                        c = c or BLEU
                         for cell in ws[1]:
                             cell.font = BOLD_BLANC; cell.fill = c
                             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                         ws.freeze_panes = "A2"; ws.row_dimensions[1].height = 30
+                        from openpyxl.utils import get_column_letter
+                        ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
 
                     def adj_w(ws):
                         for col in ws.columns:
                             ml = max((len(str(cell.value or "")) for cell in col), default=8)
                             ws.column_dimensions[col[0].column_letter].width = min(ml + 4, 50)
+
+                    def ligne_total_j2(ws, row_num, nb_cols):
+                        for ci in range(1, nb_cols+1):
+                            ws.cell(row=row_num, column=ci).font = BOLD_NOIR
+                            ws.cell(row=row_num, column=ci).fill = GRIS
 
                     # Préparer all_demands pour export
                     for s_pct in [20, 40, 60, 80]:
@@ -1074,77 +1339,299 @@ with tab4:
                     all_demands_xls['RUPTURE'] = all_demands_xls['Restant'].apply(lambda x: 'OUI' if x > 0 else '')
                     all_demands_xls['Cout conf restantes'] = all_demands_xls['Restant'] * all_demands_xls['Prix'].fillna(0)
 
+                    def _compute_seuil_rupture(row):
+                        if row['Restant'] == 0: return ''
+                        last = None
+                        for s in [20, 40, 60, 80]:
+                            if row[f'{s}%'] > 0: last = s
+                        if last is None:
+                            return 'apres Jalon 1' if row['Jalon 1'] > 0 else 'des le depart'
+                        seuils_list = [20, 40, 60, 80]
+                        idx = seuils_list.index(last)
+                        return f'a {seuils_list[idx+1]}%' if idx < len(seuils_list)-1 else 'apres 80%'
+                    all_demands_xls['Seuil rupture'] = all_demands_xls.apply(_compute_seuil_rupture, axis=1)
+
                     wb = Workbook()
 
-                    # Onglet Demande
+                    # ---- Onglet 1 : Demande ----
                     ws_d = wb.active; ws_d.title = "Demande"
                     cols_d = [c for c in ['Constructeur','Conf','Version','Conf|version','Priorité','Demande','Prix'] if c in all_demands_xls.columns]
-                    df_d = all_demands_xls[cols_d].drop_duplicates().sort_values(['Priorité','Conf|version'])
-                    for r in dataframe_to_rows(df_d, index=False, header=True): ws_d.append(r)
+                    df_d = all_demands_xls[cols_d].drop_duplicates().sort_values(['Constructeur','Priorité','Conf|version'] if 'Constructeur' in all_demands_xls.columns else ['Priorité','Conf|version'])
+                    tot_row_d = ws_d.max_row + 1
+                    for rr in dataframe_to_rows(df_d, index=False, header=True): ws_d.append(rr)
+                    tot_row_d = ws_d.max_row + 1
+                    ws_d.cell(tot_row_d, 1, "TOTAL")
+                    cidx_d = {cols_d[i]: i+1 for i in range(len(cols_d))}
+                    if 'Demande' in cidx_d: ws_d.cell(tot_row_d, cidx_d['Demande'], df_d['Demande'].sum())
+                    ligne_total_j2(ws_d, tot_row_d, len(cols_d))
                     fmt_h(ws_d); adj_w(ws_d)
+                    for row in ws_d.iter_rows(min_row=2, max_row=ws_d.max_row):
+                        for cell in row:
+                            h = ws_d.cell(1, cell.column).value
+                            if h == 'Prix' and isinstance(cell.value, (int, float)): cell.number_format = EURO_FMT
+                            elif h == 'Demande' and isinstance(cell.value, (int, float)): cell.number_format = NUM_FMT
 
-                    # Onglet Stock
+                    # ---- Onglet 2 : BOM ----
+                    ws_bom_j2 = wb.create_sheet("BOM")
+                    bom_j2_exp = bom_df[['Conf|version','Référence','Quantité']].copy().sort_values(['Conf|version','Référence'])
+                    for rr in dataframe_to_rows(bom_j2_exp, index=False, header=True): ws_bom_j2.append(rr)
+                    fmt_h(ws_bom_j2); adj_w(ws_bom_j2)
+
+                    # ---- Onglet 3 : Stock ----
                     ws_s = wb.create_sheet("Stock")
                     stock_out = stock_df.copy().rename(columns={'NVX STOCK': 'Stock initial', 'Prix (pj)': 'Prix unitaire'})
                     stock_out['Consomme J1'] = stock_out['Referentiel'].map(consumed_j1).fillna(0).round(2)
                     stock_out['Consomme J2'] = stock_out['Referentiel'].map(consumed_j2).fillna(0).round(2)
-                    stock_out['Achete J2'] = stock_out['Referentiel'].map(achats_j2).fillna(0).round(2)
+                    stock_out['Achete J2']   = stock_out['Referentiel'].map(achats_j2).fillna(0).round(2)
                     stock_out['Cout achats J2'] = (stock_out['Achete J2'] * stock_out['Prix unitaire']).round(2)
                     stock_out['Stock final'] = (stock_out['Stock initial'] - stock_out['Consomme J1'] - stock_out['Consomme J2']).round(2)
                     cols_s = ['Referentiel','Stock initial','Prix unitaire','Consomme J1','Consomme J2','Achete J2','Cout achats J2','Stock final']
                     stock_out = stock_out[cols_s].sort_values('Referentiel')
-                    for r in dataframe_to_rows(stock_out, index=False, header=True): ws_s.append(r)
+                    for rr in dataframe_to_rows(stock_out, index=False, header=True): ws_s.append(rr)
+                    tot_s = ws_s.max_row + 1
+                    ws_s.cell(tot_s, 1, "TOTAL")
+                    cidx_s = {cols_s[i]: i+1 for i in range(len(cols_s))}
+                    for cn in ['Consomme J1','Consomme J2','Achete J2','Cout achats J2']:
+                        if cn in cidx_s: ws_s.cell(tot_s, cidx_s[cn], stock_out[cn].sum())
+                    ligne_total_j2(ws_s, tot_s, len(cols_s))
                     fmt_h(ws_s); adj_w(ws_s)
+                    for row in ws_s.iter_rows(min_row=2, max_row=ws_s.max_row):
+                        for cell in row:
+                            h = ws_s.cell(1, cell.column).value
+                            if h in ['Prix unitaire','Cout achats J2'] and isinstance(cell.value, (int, float)): cell.number_format = EURO_FMT
+                    col_sf_s = cidx_s.get('Stock final')
+                    if col_sf_s:
+                        for rn in range(2, ws_s.max_row):
+                            c = ws_s.cell(rn, col_sf_s)
+                            if isinstance(c.value, (int, float)):
+                                if c.value < 0: c.fill = ROUGE
+                                elif c.value == 0: c.fill = ORANGE
 
-                    # Onglet Résultat
+                    # ---- Onglet 4 : Résultat (format complet) ----
                     ws_r = wb.create_sheet("Résultat")
                     r_row = 1
+
+                    # -- Section A : Bilan Global 5 colonnes --
                     ws_r.cell(r_row, 1, "BILAN GLOBAL").font = BOLD_BLANC_14
-                    for c in range(1, 5): ws_r.cell(r_row, c).fill = BLEU_FONCE
+                    for ci in range(1, 6): ws_r.cell(r_row, ci).fill = BLEU_FONCE
                     r_row += 2
-                    for i, h in enumerate(["Description", "Configs", "% demande", "Cout"], 1):
+                    for i, h in enumerate(["Description","Nb configs","% demande","Cout reel","Cout si conf completes"], 1):
                         ws_r.cell(r_row, i, h).font = BOLD_NOIR; ws_r.cell(r_row, i).fill = BLEU_CLAIR
                     r_row += 1
-                    for lbl, v, p, c in [
-                        ("Demande totale", total_demande, "", ""),
-                        ("", "", "", ""),
-                        ("JALON 1 — Production avec stock", total_j1, f"{pct_j1:.1f}%", f"{cout_j1:,.0f} EUR"),
-                        (f"  Seuil 20%", j2_prod_par_seuil.get(20,0), "", f"{j2_cout_par_seuil.get(20,0):,.0f} EUR"),
-                        (f"  Seuil 40%", j2_prod_par_seuil.get(40,0), "", f"{j2_cout_par_seuil.get(40,0):,.0f} EUR"),
-                        (f"  Seuil 60%", j2_prod_par_seuil.get(60,0), "", f"{j2_cout_par_seuil.get(60,0):,.0f} EUR"),
-                        (f"  Seuil 80%", j2_prod_par_seuil.get(80,0), "", f"{j2_cout_par_seuil.get(80,0):,.0f} EUR"),
-                        ("TOTAL PRODUIT J1+J2", total_produit, f"{pct_final:.1f}%", f"{cout_j1+cout_achats_j2:,.0f} EUR"),
-                        ("RESTANT EN RUPTURE", restant_final, f"{restant_final/total_demande*100:.1f}%" if total_demande>0 else "", f"{cout_conf_restantes:,.0f} EUR"),
-                        ("COUT TOTAL ESTIME", "", "", f"{cout_total_estime:,.0f} EUR"),
-                    ]:
-                        ws_r.cell(r_row, 1, lbl); ws_r.cell(r_row, 2, v if v != "" else None)
-                        ws_r.cell(r_row, 3, p); ws_r.cell(r_row, 4, c)
-                        if lbl in ["TOTAL PRODUIT J1+J2", "COUT TOTAL ESTIME", "RESTANT EN RUPTURE"]:
-                            for ci in range(1, 5): ws_r.cell(r_row, ci).font = BOLD_BLANC; ws_r.cell(r_row, ci).fill = BLEU_FONCE
+
+                    # Calculs économies J2
+                    cout_j2_si_complet_par_seuil = {20: 0.0, 40: 0.0, 60: 0.0, 80: 0.0}
+                    for d in detail_j2:
+                        if d['Statut'] == 'Produit':
+                            sn = int(d['Seuil'].replace('%',''))
+                            cout_j2_si_complet_par_seuil[sn] += d['Nb produit'] * prix_configs.get(d['Conf|version'], 0)
+                    cout_j2_si_complet = sum(cout_j2_si_complet_par_seuil.values())
+                    economie_j2 = cout_j2_si_complet - cout_achats_j2
+
+                    # Total demande
+                    ws_r.cell(r_row, 1, "Total demande"); ws_r.cell(r_row, 2, total_demande).number_format = NUM_FMT
+                    r_row += 2
+
+                    # Jalon 1
+                    ws_r.cell(r_row, 1, "JALON 1 - Production avec stock existant")
+                    for ci in range(1, 6): ws_r.cell(r_row, ci).font = BOLD_NOIR; ws_r.cell(r_row, ci).fill = BLEU_CLAIR
+                    r_row += 1
+                    ws_r.cell(r_row, 1, "  Configs produites"); ws_r.cell(r_row, 2, total_j1).number_format = NUM_FMT
+                    ws_r.cell(r_row, 3, f"{pct_j1:.1f}%"); ws_r.cell(r_row, 4, cout_j1).number_format = EURO_FMT
+                    r_row += 2
+
+                    # Jalon 2
+                    ws_r.cell(r_row, 1, "JALON 2 - Production avec achats de references unitaires")
+                    for ci in range(1, 6): ws_r.cell(r_row, ci).font = BOLD_NOIR; ws_r.cell(r_row, ci).fill = BLEU_CLAIR
+                    r_row += 1
+                    for sp in [20, 40, 60, 80]:
+                        ws_r.cell(r_row, 1, f"  Seuil {sp}%")
+                        ws_r.cell(r_row, 2, j2_prod_par_seuil.get(sp, 0)).number_format = NUM_FMT
+                        ws_r.cell(r_row, 4, j2_cout_par_seuil.get(sp, 0)).number_format = EURO_FMT
+                        ws_r.cell(r_row, 5, cout_j2_si_complet_par_seuil.get(sp, 0)).number_format = EURO_FMT
+                        ws_r.cell(r_row, 5).font = Font(italic=True, size=10)
+                        r_row += 1
+                    pct_j2_s = f"{total_j2/total_demande*100:.1f}%" if total_demande > 0 else ""
+                    ws_r.cell(r_row, 1, "  Sous-total Jalon 2"); ws_r.cell(r_row, 2, total_j2).number_format = NUM_FMT
+                    ws_r.cell(r_row, 3, pct_j2_s); ws_r.cell(r_row, 4, cout_achats_j2).number_format = EURO_FMT
+                    ws_r.cell(r_row, 5, cout_j2_si_complet).number_format = EURO_FMT
+                    for ci in range(1, 6): ws_r.cell(r_row, ci).font = BOLD_NOIR
+                    r_row += 1
+                    ws_r.cell(r_row, 1, "  \u2192 Cout economise (refs unitaires vs achat conf completes)")
+                    ws_r.cell(r_row, 4, economie_j2).number_format = EURO_FMT
+                    ws_r.cell(r_row, 4).font = BOLD_NOIR
+                    for ci in range(1, 6): ws_r.cell(r_row, ci).fill = VERT
+                    r_row += 2
+
+                    # Restant en rupture
+                    ws_r.cell(r_row, 1, "RESTANT EN RUPTURE")
+                    for ci in range(1, 6): ws_r.cell(r_row, ci).font = BOLD_NOIR; ws_r.cell(r_row, ci).fill = ORANGE
+                    r_row += 1
+                    ws_r.cell(r_row, 1, "  (necessitent achat config complete)")
+                    ws_r.cell(r_row, 2, restant_final).number_format = NUM_FMT
+                    ws_r.cell(r_row, 3, f"{restant_final/total_demande*100:.1f}%" if total_demande > 0 else "")
+                    r_row += 3
+
+                    # -- Section B : Detail par priorité --
+                    ws_r.cell(r_row, 1, "DETAIL PAR PRIORITE").font = BOLD_BLANC_14
+                    for ci in range(1, 9): ws_r.cell(r_row, ci).fill = BLEU_FONCE
+                    r_row += 1
+                    for i, h in enumerate(["Priorite","Demande","Jalon 1","J2 Total","Cout J2","Total","Restant","% couvert"], 1):
+                        ws_r.cell(r_row, i, h).font = BOLD_NOIR; ws_r.cell(r_row, i).fill = BLEU_CLAIR
+                        ws_r.cell(r_row, i).alignment = Alignment(horizontal="center")
+                    r_row += 1
+                    for prio in priorities:
+                        prio_data = all_demands_xls[all_demands_xls['Priorité'] == prio]
+                        dem_p = int(prio_data['Demande'].sum())
+                        j1_p  = int(prio_data['Jalon 1'].sum())
+                        j2_p  = int(prio_data[['20%','40%','60%','80%']].sum().sum())
+                        cout_j2_p = prio_data[['Cout 20%','Cout 40%','Cout 60%','Cout 80%']].sum().sum()
+                        tot_p = j1_p + j2_p; rest_p = dem_p - tot_p
+                        pct_p = f"{tot_p/dem_p*100:.0f}%" if dem_p > 0 else "0%"
+                        ws_r.cell(r_row, 1, prio).alignment = Alignment(horizontal="center")
+                        ws_r.cell(r_row, 2, dem_p).number_format = NUM_FMT
+                        ws_r.cell(r_row, 3, j1_p).number_format = NUM_FMT
+                        ws_r.cell(r_row, 4, j2_p).number_format = NUM_FMT
+                        ws_r.cell(r_row, 5, round(cout_j2_p, 2)).number_format = EURO_FMT
+                        ws_r.cell(r_row, 6, tot_p).number_format = NUM_FMT
+                        ws_r.cell(r_row, 7, rest_p).number_format = NUM_FMT
+                        ws_r.cell(r_row, 8, pct_p).alignment = Alignment(horizontal="center")
+                        if tot_p == dem_p: ws_r.cell(r_row, 8).fill = VERT
+                        elif tot_p == 0: ws_r.cell(r_row, 8).fill = ROUGE
+                        else: ws_r.cell(r_row, 8).fill = ORANGE
                         r_row += 1
 
-                    r_row += 2
-                    cols_cfg = [c for c in ['Constructeur','Conf|version','Priorité','Demande','Prix','Jalon 1','20%','Cout 20%','40%','Cout 40%','60%','Cout 60%','80%','Cout 80%','Total','Restant','RUPTURE','Cout conf restantes'] if c in all_demands_xls.columns]
+                    # -- Section C : Detail par configuration --
+                    r_row += 3
                     ws_r.cell(r_row, 1, "DETAIL PAR CONFIGURATION").font = BOLD_BLANC_14
-                    for ci in range(1, len(cols_cfg)+1): ws_r.cell(r_row, ci).fill = BLEU_FONCE
+                    for ci in range(1, 22): ws_r.cell(r_row, ci).fill = BLEU_FONCE
                     r_row += 1
+                    cols_cfg = [c for c in ['Constructeur','Conf','Version','Conf|version','Priorité','Demande','Prix',
+                                            'Jalon 1','20%','Cout 20%','40%','Cout 40%','60%','Cout 60%','80%','Cout 80%',
+                                            'Total','Restant','RUPTURE','Seuil rupture','Cout conf restantes'] if c in all_demands_xls.columns]
                     for i, h in enumerate(cols_cfg, 1):
                         ws_r.cell(r_row, i, h).font = BOLD_NOIR; ws_r.cell(r_row, i).fill = BLEU_CLAIR
                         ws_r.cell(r_row, i).alignment = Alignment(horizontal="center", wrap_text=True)
                     r_row += 1
-                    df_cfg = all_demands_xls[cols_cfg].sort_values(['Priorité','Conf|version'])
+                    df_cfg = all_demands_xls[cols_cfg].sort_values(['Constructeur','Priorité','Conf|version'] if 'Constructeur' in all_demands_xls.columns else ['Priorité','Conf|version'])
+                    start_cfg = r_row
                     for row_data in dataframe_to_rows(df_cfg, index=False, header=False):
-                        for ci, v in enumerate(row_data, 1): ws_r.cell(r_row, ci, v)
+                        for ci, val in enumerate(row_data, 1): ws_r.cell(r_row, ci, val)
                         r_row += 1
-                    for cl in ['A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S']:
-                        ws_r.column_dimensions[cl].width = 18
+                    # Ligne TOTAL
+                    ws_r.cell(r_row, 1, "TOTAL")
+                    cidx_cfg = {cols_cfg[i]: i+1 for i in range(len(cols_cfg))}
+                    for cn in ['Demande','Jalon 1','20%','Cout 20%','40%','Cout 40%','60%','Cout 60%','80%','Cout 80%','Total','Restant','Cout conf restantes']:
+                        if cn in cidx_cfg: ws_r.cell(r_row, cidx_cfg[cn], df_cfg[cn].sum())
+                    ligne_total_j2(ws_r, r_row, len(cols_cfg))
+                    # Formatage Section C
+                    for rn in range(start_cfg, r_row + 1):
+                        for ci in range(1, len(cols_cfg)+1):
+                            cell = ws_r.cell(rn, ci); h = cols_cfg[ci-1]
+                            if h in ['Prix','Cout 20%','Cout 40%','Cout 60%','Cout 80%','Cout conf restantes'] and isinstance(cell.value, (int, float)): cell.number_format = EURO_FMT
+                            elif h in ['Demande','Jalon 1','20%','40%','60%','80%','Total','Restant'] and isinstance(cell.value, (int, float)): cell.number_format = NUM_FMT
+                    if 'RUPTURE' in cidx_cfg:
+                        for rn in range(start_cfg, r_row):
+                            c = ws_r.cell(rn, cidx_cfg['RUPTURE'])
+                            if c.value == 'OUI': c.fill = ROUGE; c.font = BOLD_NOIR
+                            elif c.value == '': c.fill = VERT
+                    if 'Restant' in cidx_cfg:
+                        for rn in range(start_cfg, r_row):
+                            c = ws_r.cell(rn, cidx_cfg['Restant'])
+                            if isinstance(c.value, (int, float)):
+                                if c.value == 0: c.fill = VERT
+                                elif c.value > 0: c.fill = ORANGE
+                    if 'Seuil rupture' in cidx_cfg:
+                        for rn in range(start_cfg, r_row):
+                            c = ws_r.cell(rn, cidx_cfg['Seuil rupture'])
+                            if c.value and str(c.value).strip(): c.fill = ORANGE
 
-                    # Onglet Détail J2
+                    # -- Section D : Configs en rupture --
+                    r_row += 3
+                    ws_r.cell(r_row, 1, "CONFIGURATIONS EN RUPTURE - ACHAT COMPLET NECESSAIRE").font = BOLD_BLANC_14
+                    for ci in range(1, 7): ws_r.cell(r_row, ci).fill = BLEU_FONCE
+                    r_row += 1
+                    for i, h in enumerate(["Priorite","Conf|version","Qte restante","Dernier seuil tente","Prix unitaire","Cout total"], 1):
+                        ws_r.cell(r_row, i, h).font = BOLD_NOIR; ws_r.cell(r_row, i).fill = BLEU_CLAIR
+                        ws_r.cell(r_row, i).alignment = Alignment(horizontal="center")
+                    r_row += 1
+                    total_cout_rupt = 0
+                    for prio in priorities:
+                        for (cv, p) in sorted(restant):
+                            if p == prio and restant[(cv, p)] > 0:
+                                qty_r = restant[(cv, p)]; prix_cv = prix_configs.get(cv, 0); cout_r = qty_r * prix_cv
+                                total_cout_rupt += cout_r
+                                row_m = all_demands_xls[(all_demands_xls['Conf|version'] == cv) & (all_demands_xls['Priorité'] == p)]
+                                dern_seuil = row_m.iloc[0].get('Seuil rupture', '') if not row_m.empty else ''
+                                ws_r.cell(r_row, 1, prio).alignment = Alignment(horizontal="center")
+                                ws_r.cell(r_row, 2, cv)
+                                ws_r.cell(r_row, 3, qty_r).number_format = NUM_FMT
+                                ws_r.cell(r_row, 4, dern_seuil)
+                                ws_r.cell(r_row, 5, prix_cv).number_format = EURO_FMT
+                                ws_r.cell(r_row, 6, cout_r).number_format = EURO_FMT
+                                r_row += 1
+                    if restant_final > 0:
+                        ws_r.cell(r_row, 1, "TOTAL"); ws_r.cell(r_row, 3, restant_final).number_format = NUM_FMT
+                        ws_r.cell(r_row, 6, total_cout_rupt).number_format = EURO_FMT
+                        ligne_total_j2(ws_r, r_row, 6)
+
+                    # Largeurs colonnes Résultat
+                    ws_r.column_dimensions['A'].width = 50; ws_r.column_dimensions['B'].width = 22
+                    ws_r.column_dimensions['C'].width = 16; ws_r.column_dimensions['D'].width = 22
+                    ws_r.column_dimensions['E'].width = 22; ws_r.column_dimensions['F'].width = 16
+                    for cl in ['G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U']: ws_r.column_dimensions[cl].width = 14
+
+                    # ---- Onglet 5 : Detail J2 ----
                     if detail_j2:
                         ws_j2 = wb.create_sheet("Detail J2")
-                        df_dj2 = pd.DataFrame(detail_j2).sort_values(['Seuil','Priorité','Conf|version'])
-                        for r in dataframe_to_rows(df_dj2, index=False, header=True): ws_j2.append(r)
+                        df_dj2 = pd.DataFrame(detail_j2).copy()
+                        df_dj2['Budget max'] = df_dj2.apply(
+                            lambda row: (int(row['Seuil'].replace('%','')) / 100) * row['Prix conf'] if pd.notna(row.get('Prix conf')) else None, axis=1)
+                        df_dj2 = df_dj2.rename(columns={'Nb produit': 'Produit', 'Prix conf': 'Prix config'})
+                        cols_dj2 = [c for c in ['Seuil','Priorité','Conf|version','Demande restante','Produit','Budget max','Cout achat','% du prix','Statut'] if c in df_dj2.columns]
+                        df_dj2 = df_dj2[cols_dj2].sort_values(['Seuil','Priorité','Conf|version'])
+                        for rr in dataframe_to_rows(df_dj2, index=False, header=True): ws_j2.append(rr)
+                        tot_dj2 = ws_j2.max_row + 1
+                        ws_j2.cell(tot_dj2, 1, "TOTAL")
+                        cidx_dj2 = {cols_dj2[i]: i+1 for i in range(len(cols_dj2))}
+                        if 'Produit' in cidx_dj2: ws_j2.cell(tot_dj2, cidx_dj2['Produit'], df_dj2['Produit'].sum())
+                        if 'Cout achat' in cidx_dj2: ws_j2.cell(tot_dj2, cidx_dj2['Cout achat'], df_dj2['Cout achat'].sum())
+                        ligne_total_j2(ws_j2, tot_dj2, len(cols_dj2))
                         fmt_h(ws_j2); adj_w(ws_j2)
+                        for row in ws_j2.iter_rows(min_row=2, max_row=ws_j2.max_row):
+                            for cell in row:
+                                h = ws_j2.cell(1, cell.column).value
+                                if h in ['Prix config','Budget max','Cout achat'] and isinstance(cell.value, (int, float)): cell.number_format = EURO_FMT
+                        col_stat = cidx_dj2.get('Statut')
+                        if col_stat:
+                            for rn in range(2, ws_j2.max_row):
+                                c = ws_j2.cell(rn, col_stat)
+                                if c.value == 'Produit': c.fill = VERT
+                                elif c.value == 'Bloque': c.fill = ORANGE
+                                elif c.value == 'Pas de prix': c.fill = GRIS
+                        # Bonus : detail refs achetées par config
+                        if achats_detail_par_config:
+                            r_bon = ws_j2.max_row + 3
+                            ws_j2.cell(r_bon, 1, "DETAIL DES REFERENCES ACHETEES PAR CONFIG").font = BOLD_BLANC_14
+                            for ci in range(1, 7): ws_j2.cell(r_bon, ci).fill = BLEU_FONCE
+                            r_bon += 2
+                            for (cv, prio_b, sp_b), details in sorted(achats_detail_par_config.items()):
+                                ws_j2.cell(r_bon, 1, f"Config: {cv}").font = BOLD_NOIR
+                                ws_j2.cell(r_bon, 2, f"Priorité: {prio_b}")
+                                ws_j2.cell(r_bon, 3, f"Seuil: {sp_b}%")
+                                ws_j2.cell(r_bon, 4, f"Nb configs: {details['nb_configs']}")
+                                for ci in range(1, 7): ws_j2.cell(r_bon, ci).fill = JAUNE
+                                r_bon += 1
+                                for i, h in enumerate(["Référence","Qté achetée","Prix unitaire","Coût total"], 1):
+                                    ws_j2.cell(r_bon, i, h).font = BOLD_NOIR; ws_j2.cell(r_bon, i).fill = GRIS
+                                r_bon += 1
+                                for ref_d in details['references']:
+                                    ws_j2.cell(r_bon, 1, ref_d['Reference'])
+                                    ws_j2.cell(r_bon, 2, ref_d['Qte achetee']).number_format = '#,##0.00'
+                                    ws_j2.cell(r_bon, 3, ref_d['Prix unitaire']).number_format = EURO_FMT
+                                    ws_j2.cell(r_bon, 4, ref_d['Cout total']).number_format = EURO_FMT
+                                    r_bon += 1
+                                r_bon += 1
 
                     output = BytesIO()
                     wb.save(output)
