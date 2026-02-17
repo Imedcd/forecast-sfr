@@ -1107,10 +1107,17 @@ with tab4:
 
                             if max_n == 0:
                                 for cv in configs_prio:
+                                    cout_refs_necessaire = 0
+                                    for ref, bom_qty in bom_par_config[cv].items():
+                                        stock_dispo = max(0, float(stock_j2[ref])) if ref in stock_j2.index else 0
+                                        qty_a_acheter = max(0, bom_qty - stock_dispo)
+                                        cout_refs_necessaire += qty_a_acheter * ref_to_prix.get(ref, 0)
+                                    pct_cout = (cout_refs_necessaire / prix_configs[cv] * 100) if prix_configs[cv] > 0 else 0
                                     detail_j2.append({'Seuil': f"{seuil_pct}%", 'Priorité': prio, 'Conf|version': cv,
                                                       'Nb produit': 0, 'Demande restante': demand_prio[cv],
-                                                      'Prix conf': prix_configs[cv], 'Cout achat': None, 'Cout moyen/conf': None,
-                                                      '% du prix': None, 'Statut': 'Bloque'})
+                                                      'Prix conf': prix_configs[cv], 'Cout achat': round(cout_refs_necessaire, 2),
+                                                      'Cout moyen/conf': round(cout_refs_necessaire, 2),
+                                                      '% du prix': round(pct_cout, 1), 'Statut': 'Bloque'})
                                 continue
 
                             prob2 = LpProblem(f"J2_S{seuil_pct}_P{prio}_Min", LpMinimize)
