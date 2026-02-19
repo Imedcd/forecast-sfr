@@ -369,8 +369,7 @@ with tab1:
         stock_file = st.file_uploader("📂 Stock.xlsx — Stock disponible", type="xlsx", key="stock")
     with col2:
         acc_file = st.file_uploader("📂 acc.xlsx — Table de conversion des références", type="xlsx", key="acc")
-        forecast_file = st.file_uploader("📂 Forecast.xlsx — Demandes Jalon 1 sans priorité", type="xlsx", key="forecast")
-        prio_file = st.file_uploader("📂 Prio.xlsx — Demandes Jalon 1 avec priorité + Jalon 2", type="xlsx", key="prio")
+        prio_file = st.file_uploader("📂 Prio.xlsx — Demandes et priorités", type="xlsx", key="prio")
 
     st.markdown("<br>", unsafe_allow_html=True)
     files_common = all([biblio_file, prix_file, stock_file, acc_file])
@@ -407,18 +406,22 @@ with tab2:
 
     if not st.session_state.get('data_prepared'):
         st.warning("Préparez d'abord les données dans l'onglet Chargement des données")
-    elif not forecast_file:
-        st.warning("Chargez le fichier Forecast.xlsx dans l'onglet Chargement des données")
+    elif not prio_file:
+        st.warning("Chargez le fichier Prio.xlsx dans l'onglet Chargement des données")
     else:
         if st.button("Lancer l'optimisation", key="run_j1_sans", type="primary"):
             with st.spinner("Résolution en cours..."):
                 try:
-                    xl_fc = pd.ExcelFile(BytesIO(forecast_file.getvalue()), engine="openpyxl")
+                    # Lire Prio.xlsx et agréger par Conf|version (ignorer la colonne Priorité)
+                    xl_fc = pd.ExcelFile(BytesIO(prio_file.getvalue()), engine="openpyxl")
                     sheet_fc = xl_fc.sheet_names[0]
-                    df_forecast = pd.read_excel(BytesIO(forecast_file.getvalue()), sheet_name=sheet_fc,
-                        usecols=["Constructeur", "Conf", "Version", "Conf|version", "Demande"])
-                    df_forecast["Demande"] = pd.to_numeric(df_forecast["Demande"], errors="coerce").fillna(0)
-                    df_forecast = df_forecast[df_forecast["Demande"] > 0].copy()
+                    df_prio_raw = pd.read_excel(BytesIO(prio_file.getvalue()), sheet_name=sheet_fc, engine="openpyxl")
+                    df_prio_raw.columns = df_prio_raw.columns.str.strip()
+                    cols_utiles = ['Constructeur', 'Conf', 'Version', 'Conf|version', 'Demande']
+                    df_prio_raw = df_prio_raw[[c for c in cols_utiles if c in df_prio_raw.columns]].copy()
+                    df_prio_raw['Demande'] = pd.to_numeric(df_prio_raw['Demande'], errors='coerce').fillna(0).astype(int)
+                    df_prio_raw = df_prio_raw[df_prio_raw['Demande'] > 0].copy()
+                    df_forecast = df_prio_raw.groupby(['Constructeur', 'Conf', 'Version', 'Conf|version'], as_index=False)['Demande'].sum()
 
                     df_prix_conf = pd.read_excel(BytesIO(prix_file.getvalue()), sheet_name="Conf", usecols=["Conf|version", "Prix"])
                     df_prix_conf["Prix"] = pd.to_numeric(df_prix_conf["Prix"], errors="coerce")
