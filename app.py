@@ -1014,11 +1014,22 @@ with tab3:
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown('<div class="kpi-label">Détail par configuration</div>', unsafe_allow_html=True)
-                    det_cols3 = ['Constructeur', 'Conf|version', 'Priorité', 'Demande', 'J1 total', 'Restant J1']
+                    det_cols3 = ['Constructeur', 'Conf|version', 'Priorité', 'Demande', 'J1 produit']
+                    if total_j1_next > 0:
+                        det_cols3 += ['J1 Next', 'BOM Next', 'J1 total']
+                    det_cols3.append('Restant J1')
                     detail_df = all_demands[det_cols3].copy()
-                    rename3 = {'Demande': 'Configuration demandée', 'J1 total': 'Configuration réalisable', 'Restant J1': 'Restant'}
-                    detail_df = detail_df.rename(columns=rename3)
-                    detail_df['% Réalisé'] = (detail_df['Configuration réalisable'] / detail_df['Configuration demandée'] * 100).round(1)
+                    rename3 = {'Demande': 'Configuration demandée', 'J1 produit': 'Réalisable (BOM originale)', 'Restant J1': 'Restant'}
+                    if total_j1_next > 0:
+                        rename3['J1 Next'] = 'Réalisable (substitution)'
+                        rename3['BOM Next'] = 'BOM substitution'
+                        rename3['J1 total'] = 'Configuration réalisable'
+                        detail_df = detail_df.rename(columns=rename3)
+                        detail_df['% Réalisé'] = (detail_df['Configuration réalisable'] / detail_df['Configuration demandée'] * 100).round(1)
+                    else:
+                        rename3['J1 produit'] = 'Configuration réalisable'
+                        detail_df = detail_df.rename(columns=rename3)
+                        detail_df['% Réalisé'] = (detail_df['Configuration réalisable'] / detail_df['Configuration demandée'] * 100).round(1)
                     st.dataframe(detail_df, use_container_width=True, height=350, hide_index=True)
 
                     if 'Constructeur' in all_demands.columns:
@@ -1076,10 +1087,19 @@ with tab3:
 
                     # ---- Onglet 1 : Demandes ----
                     ws_dem2 = wb_ap.active; ws_dem2.title = "Demandes"
-                    cols_exp2 = ['Constructeur','Conf','Version','Priorité','Demande','J1 total','Restant J1']
+                    cols_exp2 = ['Constructeur','Conf','Version','Priorité','Demande','J1 produit']
+                    if total_j1_next > 0:
+                        cols_exp2 += ['J1 Next', 'BOM Next', 'J1 total']
+                    cols_exp2.append('Restant J1')
                     cols_exp2 = [c for c in cols_exp2 if c in df_ap_exp.columns]
                     df_exp2 = df_ap_exp[cols_exp2].copy()
-                    rename_dem2 = {'Demande': 'Demande de configuration', 'J1 total': 'Nombre de configuration réalisable', 'Restant J1': 'Restant'}
+                    rename_dem2 = {'Demande': 'Demande de configuration', 'J1 produit': 'Nb réalisable (BOM originale)', 'Restant J1': 'Restant'}
+                    if total_j1_next > 0:
+                        rename_dem2['J1 Next'] = 'Nb réalisable (substitution)'
+                        rename_dem2['BOM Next'] = 'BOM substitution'
+                        rename_dem2['J1 total'] = 'Nombre de configuration réalisable'
+                    else:
+                        rename_dem2['J1 produit'] = 'Nombre de configuration réalisable'
                     df_exp2 = df_exp2.rename(columns=rename_dem2)
                     df_exp2 = df_exp2.sort_values(['Constructeur','Priorité'] if 'Constructeur' in df_exp2.columns else ['Priorité'])
                     for rr in dataframe_to_rows(df_exp2, index=False, header=True): ws_dem2.append(rr)
@@ -1152,6 +1172,8 @@ with tab3:
                         ("Total de conf demandé", int(total_demande)),
                         ("Total de conf réalisable", int(total_j1)),
                     ]
+                    if total_j1_next > 0:
+                        recap_lines2.append(("  dont via substitution (Next)", int(total_j1_next)))
                     recap_lines2 += [
                         ("% Réalisation", f"{pct_j1:.1f}%"),
                         ("Restant", int(total_demande - total_j1)),
