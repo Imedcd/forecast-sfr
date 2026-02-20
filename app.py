@@ -585,63 +585,20 @@ with tab2:
                     val_stock_init = (stock_optim['NVX STOCK'] * stock_optim['Prix (pj)']).sum()
                     val_stock_restant = val_stock_init - cout_total
 
-                    st.markdown("<br>", unsafe_allow_html=True)
-
-                    st.markdown('<div class="kpi-label">Résultats de l\'optimisation</div>', unsafe_allow_html=True)
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Demande totale de configuration", f"{int(total_demande)}")
-                    c2.metric("Configurations réalisables", f"{int(total_produit)}")
-                    c3.metric("Taux de réalisation", f"{pct:.1f}%")
-                    c4.metric("Valeur stock consommable", f"{cout_total:,.0f} €".replace(',', ' '))
-
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    st.markdown('<div class="kpi-label">Détail par Conf</div>', unsafe_allow_html=True)
-
-                    # Construire tableau avec une ligne par version, groupé par Conf
-                    rows_display = []
-                    conf_summary = []  # pour le récap constructeur
-                    for conf in sorted(demand_conf_map.keys()):
-                        dem = demand_conf_map[conf]
-                        cvs = versions_by_conf[conf]
-                        prod_conf = sum(produced.get(cv, 0) for cv in cvs)
-                        rest = dem - prod_conf
-                        pct_conf = round(prod_conf / dem * 100, 1) if dem > 0 else 0
-                        match = df_versions[df_versions['Conf'] == conf]
-                        constr = match['Constructeur'].iloc[0] if not match.empty else '?'
-                        conf_summary.append({'Constructeur': constr, 'Demande': dem, 'Produit': prod_conf})
-
-                        for cv in cvs:
-                            qty = produced.get(cv, 0)
-                            vm = df_versions[df_versions['Conf|version'] == cv]
-                            ver = vm['Version'].iloc[0] if not vm.empty else cv.split('|')[0]
-                            cv_cstr = vm['Constructeur'].iloc[0] if not vm.empty else ''
-                            rows_display.append({
-                                'Constructeur': cv_cstr,
-                                'Conf': conf,
-                                'Version': ver,
-                                'Conf|version': cv,
-                                'Demande (Conf)': dem,
-                                'Produit': qty,
-                                '% Réalisé (Conf)': pct_conf,
-                                'Restant (Conf)': rest,
-                            })
-
-                    detail_df = pd.DataFrame(rows_display)
-                    st.dataframe(detail_df, use_container_width=True, height=450, hide_index=True)
-
-                    # Répartition par constructeur
-                    st.markdown('<div class="kpi-label">Répartition par constructeur</div>', unsafe_allow_html=True)
-                    summary_df = pd.DataFrame(conf_summary)
-                    constr_df = summary_df.groupby('Constructeur').agg(
-                        Demande=('Demande', 'sum'), Produit=('Produit', 'sum')
-                    ).reset_index()
-                    constr_df['Restant'] = constr_df['Demande'] - constr_df['Produit']
-                    constr_df['Taux %'] = (constr_df['Produit'] / constr_df['Demande'] * 100).round(1).astype(str) + '%'
-                    constr_df = constr_df.rename(columns={
-                        'Demande': 'Configurations demandées',
-                        'Produit': 'Configuration réalisable'
-                    })
-                    st.dataframe(constr_df, use_container_width=True, hide_index=True)
+                    # Stocker les résultats pour affichage persistant
+                    st.session_state['j1_sp_result'] = {
+                        'demand_conf_map': demand_conf_map,
+                        'versions_by_conf': versions_by_conf,
+                        'produced': produced,
+                        'consumed': consumed,
+                        'df_versions': df_versions,
+                        'total_demande': total_demande,
+                        'total_produit': total_produit,
+                        'pct': pct,
+                        'cout_total': cout_total,
+                        'val_stock_init': float(val_stock_init),
+                        'stock_optim': stock_optim,
+                    }
 
                     # Export Excel - 4 onglets
                     _BLEU     = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -832,6 +789,125 @@ with tab2:
                     st.error(f"Erreur : {e}")
                     import traceback
                     st.code(traceback.format_exc())
+
+        # -------- Affichage persistant des résultats --------
+        if 'j1_sp_result' in st.session_state:
+            _r = st.session_state['j1_sp_result']
+            _dcm = _r['demand_conf_map']
+            _vbc = _r['versions_by_conf']
+            _prod = _r['produced']
+            _cons = _r['consumed']
+            _dfv = _r['df_versions']
+            _td = _r['total_demande']
+            _tp = _r['total_produit']
+            _pct = _r['pct']
+            _ct = _r['cout_total']
+            _sopt = _r['stock_optim']
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown('<div class="kpi-label">Résultats de l\'optimisation</div>', unsafe_allow_html=True)
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Demande totale de configuration", f"{int(_td)}")
+            k2.metric("Configurations réalisables", f"{int(_tp)}")
+            k3.metric("Taux de réalisation", f"{_pct:.1f}%")
+            k4.metric("Valeur stock consommable", f"{_ct:,.0f} €".replace(',', ' '))
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown('<div class="kpi-label">Détail par Conf</div>', unsafe_allow_html=True)
+
+            rows_disp = []
+            conf_summ = []
+            for conf in sorted(_dcm.keys()):
+                dem = _dcm[conf]; cvs = _vbc[conf]
+                prod_c = sum(_prod.get(cv, 0) for cv in cvs)
+                rest = dem - prod_c
+                pct_c = round(prod_c / dem * 100, 1) if dem > 0 else 0
+                m = _dfv[_dfv['Conf'] == conf]
+                cstr = m['Constructeur'].iloc[0] if not m.empty else '?'
+                conf_summ.append({'Constructeur': cstr, 'Demande': dem, 'Produit': prod_c})
+                for cv in cvs:
+                    qty = _prod.get(cv, 0)
+                    vm = _dfv[_dfv['Conf|version'] == cv]
+                    ver = vm['Version'].iloc[0] if not vm.empty else cv.split('|')[0]
+                    cv_c = vm['Constructeur'].iloc[0] if not vm.empty else ''
+                    rows_disp.append({
+                        'Constructeur': cv_c, 'Conf': conf, 'Version': ver,
+                        'Conf|version': cv, 'Demande (Conf)': dem, 'Produit': qty,
+                        '% Réalisé (Conf)': pct_c, 'Restant (Conf)': rest,
+                    })
+            detail_df = pd.DataFrame(rows_disp)
+            st.dataframe(detail_df, use_container_width=True, height=450, hide_index=True)
+
+            st.markdown('<div class="kpi-label">Répartition par constructeur</div>', unsafe_allow_html=True)
+            sdf = pd.DataFrame(conf_summ)
+            cdf = sdf.groupby('Constructeur').agg(Demande=('Demande', 'sum'), Produit=('Produit', 'sum')).reset_index()
+            cdf['Restant'] = cdf['Demande'] - cdf['Produit']
+            cdf['Taux %'] = (cdf['Produit'] / cdf['Demande'] * 100).round(1).astype(str) + '%'
+            cdf = cdf.rename(columns={'Demande': 'Configurations demandées', 'Produit': 'Configuration réalisable'})
+            st.dataframe(cdf, use_container_width=True, hide_index=True)
+
+            # -------- Dashboard : détail des références par configuration --------
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown('<div class="kpi-label">Détail des références par configuration</div>', unsafe_allow_html=True)
+
+            conf_opts = sorted(_dcm.keys())
+            sel_conf = st.selectbox("Configuration", conf_opts, key="sel_conf_sp")
+
+            if sel_conf:
+                dem_s = _dcm[sel_conf]; cvs_s = _vbc[sel_conf]
+                prod_s = sum(_prod.get(cv, 0) for cv in cvs_s)
+                rest_s = dem_s - prod_s
+                pct_s = round(prod_s / dem_s * 100, 1) if dem_s > 0 else 0
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Demande", f"{dem_s}")
+                m2.metric("Produit", f"{prod_s}")
+                m3.metric("% Réalisation", f"{pct_s}%")
+                m4.metric("Restant", f"{rest_s}")
+
+                # Versions produites
+                st.markdown('<div class="kpi-label">Versions produites</div>', unsafe_allow_html=True)
+                vr = []
+                for cv in cvs_s:
+                    qty = _prod.get(cv, 0)
+                    vm = _dfv[_dfv['Conf|version'] == cv]
+                    ver = vm['Version'].iloc[0] if not vm.empty else cv.split('|')[0]
+                    cv_c = vm['Constructeur'].iloc[0] if not vm.empty else ''
+                    vr.append({'Constructeur': cv_c, 'Version': ver, 'Conf|version': cv, 'Produit': qty})
+                st.dataframe(pd.DataFrame(vr), use_container_width=True, hide_index=True)
+
+                # Références consommées
+                _bom = st.session_state['bom_df']
+                ref_rows = []
+                for cv in cvs_s:
+                    qty_cv = _prod.get(cv, 0)
+                    if qty_cv > 0:
+                        bom_cv = _bom[_bom['Conf|version'] == cv]
+                        for _, br in bom_cv.iterrows():
+                            ref = br['Référence']; bom_qty = br['Quantité']
+                            cons_qty = bom_qty * qty_cv
+                            prix = float(_sopt.at[ref, 'Prix (pj)']) if ref in _sopt.index else 0
+                            desig = _sopt.at[ref, 'Designation'] if ref in _sopt.index and 'Designation' in _sopt.columns else ''
+                            stk = float(_sopt.at[ref, 'NVX STOCK']) if ref in _sopt.index else 0
+                            ref_rows.append({
+                                'Référence': ref, 'Designation': desig,
+                                'BOM/unité': int(bom_qty), 'Qté consommée': int(cons_qty),
+                                'Stock initial': int(stk), 'Prix unitaire': round(prix, 2),
+                                'Coût': round(cons_qty * prix, 2),
+                            })
+                if ref_rows:
+                    st.markdown('<div class="kpi-label">Références consommées</div>', unsafe_allow_html=True)
+                    rdf = pd.DataFrame(ref_rows)
+                    ragg = rdf.groupby(['Référence', 'Designation']).agg({
+                        'Qté consommée': 'sum', 'Stock initial': 'first', 'Prix unitaire': 'first',
+                    }).reset_index()
+                    ragg['Coût'] = ragg['Qté consommée'] * ragg['Prix unitaire']
+                    ragg = ragg.sort_values('Coût', ascending=False)
+                    st.dataframe(ragg, use_container_width=True, hide_index=True)
+                    tot_cout_ref = ragg['Coût'].sum()
+                    st.markdown(f"**Coût total des références consommées : {tot_cout_ref:,.0f} EUR**".replace(',', ' '))
+                else:
+                    st.info("Aucune référence consommée pour cette configuration (0 produit)")
 
         if 'j1_sp_excel' in st.session_state:
             st.markdown("<br>", unsafe_allow_html=True)
