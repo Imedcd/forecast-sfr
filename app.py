@@ -23,7 +23,7 @@ st.set_page_config(
 )
 
 # =============================================================================
-# CSS GLOBAL ////////////
+# CSS GLOBAL
 # =============================================================================
 st.markdown("""
 <style>
@@ -208,11 +208,12 @@ def prepare_common_data(biblio_file, prix_file, stock_file, acc_file):
             if ref in code_to_ref:
                 bom_df.at[idx, "Référence"] = code_to_ref[ref]
 
-    df_stock = pd.read_excel(stock_file, sheet_name="Stock", usecols=["Code", "Designation", "Stock Dispo", "Prévisionnel"])
+    df_stock = pd.read_excel(stock_file, sheet_name="Stock", usecols=["Code", "Designation", "Stock Dispo", "Prévisionnel", "Stock shields"])
     df_stock = df_stock.rename(columns={"Code": "Référence"})
     df_stock["Designation"] = df_stock["Designation"].fillna("")
     df_stock["Stock"] = (pd.to_numeric(df_stock["Stock Dispo"], errors='coerce').fillna(0) +
-                         pd.to_numeric(df_stock["Prévisionnel"], errors='coerce').fillna(0))
+                         pd.to_numeric(df_stock["Prévisionnel"], errors='coerce').fillna(0) +
+                         pd.to_numeric(df_stock["Stock shields"], errors='coerce').fillna(0))
     df_stock = df_stock[["Référence", "Designation", "Stock"]].copy()
     df_stock["Référence"] = df_stock["Référence"].astype(str).str.strip().str.upper()
 
@@ -258,11 +259,14 @@ def lp_val(v):
     return max(0, x) if x is not None else 0
 
 
-def run_jalon1(all_demands, bom_df, stock_df, q, priorities, prix_file_bytes):
+def run_jalon1(all_demands, bom_df, stock_df, q, priorities, prix_file_bytes, next_map=None):
+    if next_map is None:
+        next_map = {}
     stock_optim = stock_df.set_index("Referentiel")
     stock_optim['Prix (pj)'] = pd.to_numeric(stock_optim['Prix (pj)'], errors='coerce').fillna(0.0)
     stock_current = stock_optim['NVX STOCK'].copy()
     produced_j1 = {}
+    produced_next_j1 = {}
 
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -330,6 +334,68 @@ def run_jalon1(all_demands, bom_df, stock_df, q, priorities, prix_file_bytes):
                 if cons > 0 and ref in stock_current.index:
                     stock_current[ref] = max(0, stock_current[ref] - cons)
 
+        # --- Passe de substitution (Next) pour cette priorité ---
+        if next_map:
+            next_candidates = {}
+            for cv in X:
+                qty_orig = produced_j1.get((cv, prio_level), 0)
+                remaining = demand_map.get(cv, 0) - qty_orig
+                if remaining > 0 and cv in next_map:
+                    next_cv = next_map[cv]
+                    if next_cv in q.index:
+                        next_candidates[cv] = (next_cv, remaining)
+            if next_candidates:
+                prob_n1 = LpProblem(f"Next_P{prio_level}_MaxQty", LpMaximize)
+                XN1 = {}
+                for cv, (next_cv, rem) in next_candidates.items():
+                    safe = cv.replace('|','_').replace(' ','_')
+                    XN1[cv] = LpVariable(f"XN1_{safe}_p{prio_level}", 0, rem, LpInteger)
+                prob_n1 += lpSum(XN1.values())
+                for ref in q.columns:
+                    coeffs = []
+                    for cv, (next_cv, rem) in next_candidates.items():
+                        coef = q.at[next_cv, ref]
+                        if coef > 0:
+                            coeffs.append((coef, XN1[cv]))
+                    if coeffs:
+                        lim = stock_current[ref] if ref in stock_current.index else 0
+                        prob_n1 += lpSum(c * v for c, v in coeffs) <= lim
+                prob_n1.solve(PULP_CBC_CMD(msg=0, gapRel=0.0))
+                max_next = value(prob_n1.objective) or 0
+                if max_next > 0:
+                    prob_n2 = LpProblem(f"Next_P{prio_level}_MaxCost", LpMaximize)
+                    XN = {}
+                    for cv, (next_cv, rem) in next_candidates.items():
+                        safe = cv.replace('|','_').replace(' ','_')
+                        XN[cv] = LpVariable(f"XN_{safe}_p{prio_level}", 0, rem, LpInteger)
+                    cout_next = lpSum(
+                        XN[cv] * sum(q.at[next_candidates[cv][0], ref] * stock_optim.at[ref, 'Prix (pj)']
+                                     for ref in q.columns if ref in stock_optim.index
+                                     and q.at[next_candidates[cv][0], ref] > 0)
+                        for cv in XN
+                    )
+                    prob_n2 += cout_next
+                    prob_n2 += lpSum(XN.values()) == max_next
+                    for ref in q.columns:
+                        coeffs = []
+                        for cv, (next_cv, rem) in next_candidates.items():
+                            coef = q.at[next_cv, ref]
+                            if coef > 0:
+                                coeffs.append((coef, XN[cv]))
+                        if coeffs:
+                            lim = stock_current[ref] if ref in stock_current.index else 0
+                            prob_n2 += lpSum(c * v for c, v in coeffs) <= lim
+                    prob_n2.solve(PULP_CBC_CMD(msg=0, gapRel=0.01))
+                    for cv in XN:
+                        qty_n = max(0, int(round(value(XN[cv].varValue) or 0)))
+                        if qty_n > 0:
+                            produced_next_j1[(cv, prio_level)] = qty_n
+                            next_cv = next_candidates[cv][0]
+                            for ref in q.columns:
+                                cons = q.at[next_cv, ref] * qty_n
+                                if cons > 0 and ref in stock_current.index:
+                                    stock_current[ref] = max(0, stock_current[ref] - cons)
+
     progress_bar.progress(1.0)
 
     consumed_j1 = {}
@@ -339,8 +405,15 @@ def run_jalon1(all_demands, bom_df, stock_df, q, priorities, prix_file_bytes):
                 cons = q.at[cv, ref] * qty
                 if cons > 0:
                     consumed_j1[ref] = consumed_j1.get(ref, 0) + cons
+    for (cv, prio), qty in produced_next_j1.items():
+        next_cv = next_map.get(cv, '')
+        if next_cv and next_cv in q.index and qty > 0:
+            for ref in q.columns:
+                cons = q.at[next_cv, ref] * qty
+                if cons > 0:
+                    consumed_j1[ref] = consumed_j1.get(ref, 0) + cons
     cout_j1 = sum(qty * stock_optim.at[ref, 'Prix (pj)'] for ref, qty in consumed_j1.items() if ref in stock_optim.index)
-    return produced_j1, consumed_j1, cout_j1, stock_current.copy(), stock_optim
+    return produced_j1, consumed_j1, cout_j1, stock_current.copy(), stock_optim, produced_next_j1
 
 
 # =============================================================================
@@ -412,7 +485,7 @@ with tab2:
         if st.button("Lancer l'optimisation", key="run_j1_sans", type="primary"):
             with st.spinner("Résolution en cours..."):
                 try:
-                    # Lire Prio.xlsx et agréger par Conf|version (ignorer la colonne Priorité)
+                    # Lire Prio.xlsx et agréger par Conf (le solveur choisit les versions)
                     xl_fc = pd.ExcelFile(BytesIO(prio_file.getvalue()), engine="openpyxl")
                     sheet_fc = xl_fc.sheet_names[0]
                     df_prio_raw = pd.read_excel(BytesIO(prio_file.getvalue()), sheet_name=sheet_fc, engine="openpyxl")
@@ -421,11 +494,19 @@ with tab2:
                     df_prio_raw = df_prio_raw[[c for c in cols_utiles if c in df_prio_raw.columns]].copy()
                     df_prio_raw['Demande'] = pd.to_numeric(df_prio_raw['Demande'], errors='coerce').fillna(0).astype(int)
                     df_prio_raw = df_prio_raw[df_prio_raw['Demande'] > 0].copy()
-                    df_forecast = df_prio_raw.groupby(['Constructeur', 'Conf', 'Version', 'Conf|version'], as_index=False)['Demande'].sum()
 
-                    df_prix_conf = pd.read_excel(BytesIO(prix_file.getvalue()), sheet_name="Conf", usecols=["Conf|version", "Prix"])
-                    df_prix_conf["Prix"] = pd.to_numeric(df_prix_conf["Prix"], errors="coerce")
-                    demand_df = df_forecast.merge(df_prix_conf, on="Conf|version", how="left")
+                    # Agréger la demande par Conf
+                    demand_by_conf = df_prio_raw.groupby('Conf', as_index=False)['Demande'].sum()
+                    demand_conf_map = dict(zip(demand_by_conf['Conf'], demand_by_conf['Demande']))
+
+                    # Versions disponibles par Conf
+                    versions_by_conf = {}
+                    for conf in demand_conf_map:
+                        cvs = df_prio_raw[df_prio_raw['Conf'] == conf]['Conf|version'].unique().tolist()
+                        versions_by_conf[conf] = cvs
+
+                    # Détail par version (pour l'affichage)
+                    df_versions = df_prio_raw[['Constructeur', 'Conf', 'Version', 'Conf|version']].drop_duplicates('Conf|version')
 
                     bom_df = st.session_state['bom_df']
                     stock_df = st.session_state['stock_df'].copy()
@@ -433,16 +514,30 @@ with tab2:
                     stock_optim['Prix (pj)'] = pd.to_numeric(stock_optim['Prix (pj)'], errors='coerce').fillna(0.0)
 
                     q = bom_df.pivot_table(index='Conf|version', columns='Référence', values='Quantité', aggfunc='sum').fillna(0)
-                    configs = [cv for cv in demand_df['Conf|version'].unique() if cv in q.index]
-                    demand_map = dict(zip(demand_df['Conf|version'], demand_df['Demande']))
 
+                    # Toutes les Conf|versions avec BOM disponible
+                    all_cvs = []
+                    for conf, cvs in versions_by_conf.items():
+                        for cv in cvs:
+                            if cv in q.index:
+                                all_cvs.append(cv)
+
+                    cv_to_conf = {}
+                    for conf, cvs in versions_by_conf.items():
+                        for cv in cvs:
+                            cv_to_conf[cv] = conf
+
+                    # Étape 1 : max nombre de configs
                     prob1 = LpProblem("Max_Nb_Configs", LpMaximize)
                     X1 = {}
-                    for cv in configs:
-                        dem_max = demand_map.get(cv, 0)
-                        if dem_max > 0:
-                            X1[cv] = LpVariable(f"X1_{cv.replace('|','_').replace(' ','_').replace('-','_')}", 0, dem_max, LpInteger)
+                    for cv in all_cvs:
+                        safe = cv.replace('|','_').replace(' ','_').replace('-','_')
+                        X1[cv] = LpVariable(f"X1_{safe}", 0, cat=LpInteger)
                     prob1 += lpSum(X1.values())
+                    for conf, dem in demand_conf_map.items():
+                        cvs_conf = [cv for cv in versions_by_conf[conf] if cv in X1]
+                        if cvs_conf:
+                            prob1 += lpSum(X1[cv] for cv in cvs_conf) <= dem
                     for ref in q.columns:
                         coeffs = [(q.at[cv, ref], X1[cv]) for cv in X1 if q.at[cv, ref] > 0]
                         if coeffs:
@@ -451,12 +546,12 @@ with tab2:
                     prob1.solve(PULP_CBC_CMD(msg=0, timeLimit=900, gapRel=0.0))
                     max_configs = value(prob1.objective) or 0
 
+                    # Étape 2 : max coût stock consommé
                     prob2 = LpProblem("Max_Cout_Stock", LpMaximize)
                     X = {}
-                    for cv in configs:
-                        dem_max = demand_map.get(cv, 0)
-                        if dem_max > 0:
-                            X[cv] = LpVariable(f"X_{cv.replace('|','_').replace(' ','_').replace('-','_')}", 0, dem_max, LpInteger)
+                    for cv in all_cvs:
+                        safe = cv.replace('|','_').replace(' ','_').replace('-','_')
+                        X[cv] = LpVariable(f"X_{safe}", 0, cat=LpInteger)
                     cout_stock = lpSum(
                         X[cv] * sum(q.at[cv, ref] * stock_optim.at[ref, 'Prix (pj)']
                                     for ref in q.columns if ref in stock_optim.index and q.at[cv, ref] > 0)
@@ -464,6 +559,10 @@ with tab2:
                     )
                     prob2 += cout_stock
                     prob2 += lpSum(X.values()) == max_configs
+                    for conf, dem in demand_conf_map.items():
+                        cvs_conf = [cv for cv in versions_by_conf[conf] if cv in X]
+                        if cvs_conf:
+                            prob2 += lpSum(X[cv] for cv in cvs_conf) <= dem
                     for ref in q.columns:
                         coeffs = [(q.at[cv, ref], X[cv]) for cv in X if q.at[cv, ref] > 0]
                         if coeffs:
@@ -474,18 +573,15 @@ with tab2:
                     produced = {cv: max(0, int(round(value(X[cv].varValue) or 0))) for cv in X}
                     consumed = {}
                     for ref in q.columns:
-                        qty = sum(q.at[cv, ref] * produced.get(cv, 0) for cv in configs if cv in produced)
+                        qty = sum(q.at[cv, ref] * produced.get(cv, 0) for cv in all_cvs)
                         if qty > 0:
                             consumed[ref] = round(qty)
+
                     cout_total = sum(qty * stock_optim.at[ref, 'Prix (pj)'] for ref, qty in consumed.items() if ref in stock_optim.index)
 
-                    demand_df['Qté produite'] = demand_df['Conf|version'].map(produced).fillna(0).astype(int)
-                    demand_df['Restant'] = demand_df['Demande'] - demand_df['Qté produite']
-                    total_demande = demand_df['Demande'].sum()
-                    total_produit = demand_df['Qté produite'].sum()
+                    total_demande = sum(demand_conf_map.values())
+                    total_produit = sum(produced.values())
                     pct = (total_produit / total_demande * 100) if total_demande > 0 else 0
-                    nb_rupture = (demand_df['Restant'] > 0).sum()
-                    val_manquante = (demand_df['Restant'] * demand_df['Prix'].fillna(0)).sum()
                     val_stock_init = (stock_optim['NVX STOCK'] * stock_optim['Prix (pj)']).sum()
                     val_stock_restant = val_stock_init - cout_total
 
@@ -499,29 +595,55 @@ with tab2:
                     c4.metric("Valeur stock consommable", f"{cout_total:,.0f} €".replace(',', ' '))
 
                     st.markdown("<br>", unsafe_allow_html=True)
-                    st.markdown('<div class="kpi-label">Détail par configuration</div>', unsafe_allow_html=True)
-                    detail_df = demand_df[['Constructeur', 'Conf|version', 'Demande', 'Qté produite', 'Restant']].copy()
-                    detail_df = detail_df.rename(columns={
-                        'Demande': 'Configuration demandée',
-                        'Qté produite': 'Configuration réalisable'
+                    st.markdown('<div class="kpi-label">Détail par Conf</div>', unsafe_allow_html=True)
+
+                    # Construire tableau avec une ligne par version, groupé par Conf
+                    rows_display = []
+                    conf_summary = []  # pour le récap constructeur
+                    for conf in sorted(demand_conf_map.keys()):
+                        dem = demand_conf_map[conf]
+                        cvs = versions_by_conf[conf]
+                        prod_conf = sum(produced.get(cv, 0) for cv in cvs)
+                        rest = dem - prod_conf
+                        pct_conf = round(prod_conf / dem * 100, 1) if dem > 0 else 0
+                        match = df_versions[df_versions['Conf'] == conf]
+                        constr = match['Constructeur'].iloc[0] if not match.empty else '?'
+                        conf_summary.append({'Constructeur': constr, 'Demande': dem, 'Produit': prod_conf})
+
+                        for cv in cvs:
+                            qty = produced.get(cv, 0)
+                            vm = df_versions[df_versions['Conf|version'] == cv]
+                            ver = vm['Version'].iloc[0] if not vm.empty else cv.split('|')[0]
+                            cv_cstr = vm['Constructeur'].iloc[0] if not vm.empty else ''
+                            rows_display.append({
+                                'Constructeur': cv_cstr,
+                                'Conf': conf,
+                                'Version': ver,
+                                'Conf|version': cv,
+                                'Demande (Conf)': dem,
+                                'Produit': qty,
+                                '% Réalisé (Conf)': pct_conf,
+                                'Restant (Conf)': rest,
+                            })
+
+                    detail_df = pd.DataFrame(rows_display)
+                    st.dataframe(detail_df, use_container_width=True, height=450, hide_index=True)
+
+                    # Répartition par constructeur
+                    st.markdown('<div class="kpi-label">Répartition par constructeur</div>', unsafe_allow_html=True)
+                    summary_df = pd.DataFrame(conf_summary)
+                    constr_df = summary_df.groupby('Constructeur').agg(
+                        Demande=('Demande', 'sum'), Produit=('Produit', 'sum')
+                    ).reset_index()
+                    constr_df['Restant'] = constr_df['Demande'] - constr_df['Produit']
+                    constr_df['Taux %'] = (constr_df['Produit'] / constr_df['Demande'] * 100).round(1).astype(str) + '%'
+                    constr_df = constr_df.rename(columns={
+                        'Demande': 'Configurations demandées',
+                        'Produit': 'Configuration réalisable'
                     })
-                    detail_df['% Réalisé'] = (detail_df['Configuration réalisable'] / detail_df['Configuration demandée'] * 100).round(1)
-                    st.dataframe(detail_df, use_container_width=True, height=350, hide_index=True)
+                    st.dataframe(constr_df, use_container_width=True, hide_index=True)
 
-                    if 'Constructeur' in demand_df.columns:
-                        st.markdown('<div class="kpi-label">Répartition par constructeur</div>', unsafe_allow_html=True)
-                        constr = demand_df.groupby('Constructeur').agg(
-                            Demande=('Demande', 'sum'), Produit=('Qté produite', 'sum')
-                        ).reset_index()
-                        constr['Restant'] = constr['Demande'] - constr['Produit']
-                        constr['Taux %'] = (constr['Produit'] / constr['Demande'] * 100).round(1).astype(str) + '%'
-                        constr = constr.rename(columns={
-                            'Demande': 'Configurations demandées',
-                            'Produit': 'Configuration réalisable'
-                        })
-                        st.dataframe(constr, use_container_width=True, hide_index=True)
-
-                    # Export Excel - 4 onglets identiques au script standalone
+                    # Export Excel - 4 onglets
                     _BLEU     = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
                     _BLEU_C   = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
                     _VERT     = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
@@ -556,29 +678,50 @@ with tab2:
 
                     wb_sp = Workbook()
 
-                    # ---- Onglet 1 : Demandes ----
+                    # ---- Onglet 1 : Demandes (cellules Conf fusionnées) ----
                     ws_dem = wb_sp.active; ws_dem.title = "Demandes"
-                    cols_exp = [c for c in ['Constructeur','Conf','Version','Demande','Qté produite','Restant'] if c in demand_df.columns]
-                    df_exp = demand_df[cols_exp].copy()
-                    df_exp = df_exp.rename(columns={'Demande': 'Demande de configuration', 'Qté produite': 'Nombre de configuration réalisable'})
-                    df_exp = df_exp.sort_values('Conf')
-                    for rr in dataframe_to_rows(df_exp, index=False, header=True): ws_dem.append(rr)
-                    tot_row = ws_dem.max_row + 1
-                    ws_dem.cell(tot_row, 1, "TOTAL")
-                    cidx = {list(df_exp.columns)[i]: i+1 for i in range(len(df_exp.columns))}
-                    for cn in ['Demande de configuration','Nombre de configuration réalisable','Restant']:
-                        if cn in cidx: ws_dem.cell(tot_row, cidx[cn], df_exp[cn].sum())
-                    _ligne_tot(ws_dem, tot_row, len(df_exp.columns))
-                    _fmt_h(ws_dem); _adj_w(ws_dem)
-                    for row in ws_dem.iter_rows(min_row=2, max_row=ws_dem.max_row):
-                        for cell in row:
-                            h = ws_dem.cell(1, cell.column).value
-                            if h in ['Demande de configuration','Nombre de configuration réalisable','Restant'] and isinstance(cell.value, (int, float)): cell.number_format = _NUM
-                    if 'Restant' in cidx:
-                        for rn in range(2, ws_dem.max_row):
-                            c = ws_dem.cell(rn, cidx['Restant'])
-                            if isinstance(c.value, (int, float)):
-                                c.fill = _VERT if c.value == 0 else _ORANGE if c.value > 0 else c.fill
+                    hdrs_dem = ["Constructeur","Conf","Version","Conf|version","Demande (Conf)","Produit (version)","Produit (Conf)","% Réalisation","Restant (Conf)"]
+                    for i, h in enumerate(hdrs_dem, 1):
+                        ws_dem.cell(1, i, h).font = _BB; ws_dem.cell(1, i).fill = _BLEU
+                        ws_dem.cell(1, i).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                    rw = 2
+                    _merge_dem = [2, 5, 7, 8, 9]  # colonnes Conf-level
+                    for conf in sorted(demand_conf_map.keys()):
+                        dem = demand_conf_map[conf]
+                        cvs = versions_by_conf[conf]
+                        prod_c = sum(produced.get(cv, 0) for cv in cvs)
+                        rest = dem - prod_c
+                        pct_c = round(prod_c / dem * 100, 1) if dem > 0 else 0
+                        rs = rw
+                        for cv in cvs:
+                            qty = produced.get(cv, 0)
+                            vm = df_versions[df_versions['Conf|version'] == cv]
+                            ver = vm['Version'].iloc[0] if not vm.empty else cv.split('|')[0]
+                            cv_cstr = vm['Constructeur'].iloc[0] if not vm.empty else ''
+                            ws_dem.cell(rw, 1, cv_cstr); ws_dem.cell(rw, 2, conf)
+                            ws_dem.cell(rw, 3, ver); ws_dem.cell(rw, 4, cv)
+                            ws_dem.cell(rw, 5, dem).number_format = _NUM
+                            ws_dem.cell(rw, 6, qty).number_format = _NUM
+                            ws_dem.cell(rw, 7, prod_c).number_format = _NUM
+                            ws_dem.cell(rw, 8, f"{pct_c:.1f}%").alignment = Alignment(horizontal="center")
+                            ws_dem.cell(rw, 9, rest).number_format = _NUM
+                            rw += 1
+                        re = rw - 1
+                        if re > rs:
+                            for col in _merge_dem:
+                                ws_dem.merge_cells(start_row=rs, start_column=col, end_row=re, end_column=col)
+                                ws_dem.cell(rs, col).alignment = Alignment(horizontal="center", vertical="center")
+                        if rest == 0: ws_dem.cell(rs, 9).fill = _VERT
+                        elif rest > 0: ws_dem.cell(rs, 9).fill = _ORANGE
+                    # Ligne TOTAL
+                    gt_dem = int(sum(demand_conf_map.values())); gt_prod = int(sum(produced.values()))
+                    ws_dem.cell(rw, 1, "TOTAL")
+                    ws_dem.cell(rw, 5, gt_dem); ws_dem.cell(rw, 6, gt_prod); ws_dem.cell(rw, 7, gt_prod)
+                    pct_t = round(gt_prod / gt_dem * 100, 1) if gt_dem > 0 else 0
+                    ws_dem.cell(rw, 8, f"{pct_t:.1f}%"); ws_dem.cell(rw, 9, gt_dem - gt_prod)
+                    _ligne_tot(ws_dem, rw, 9)
+                    ws_dem.freeze_panes = "A2"; ws_dem.row_dimensions[1].height = 30
+                    ws_dem.auto_filter.ref = f"A1:I{rw}"; _adj_w(ws_dem)
 
                     # ---- Onglet 2 : BOM ----
                     ws_bom = wb_sp.create_sheet("BOM")
@@ -623,43 +766,62 @@ with tab2:
                     ws_res.cell(rr, 1, "RÉCAPITULATIF GLOBAL").font = _BB14
                     for ci in range(1, 4): ws_res.cell(rr, ci).fill = _BLEU_F
                     rr = 3
-                    cout_stk_init = float((stock_optim['NVX STOCK'] * stock_optim['Prix (pj)']).sum())
+                    cout_stk_init = float(val_stock_init)
                     cout_stk_fin = cout_stk_init - cout_total
-                    for lbl, val in [
+                    recap_lines = [
                         ("Total de conf demandé", int(total_demande)),
                         ("Total de conf réalisable", int(total_produit)),
                         ("% Réalisation", f"{pct:.1f}%"),
                         ("Restant", int(total_demande - total_produit)),
                         ("Stock initial (EUR)", round(cout_stk_init, 2)),
-                        ("Stock consommable", round(cout_total, 2)),
+                        ("Stock consommable (EUR)", round(cout_total, 2)),
                         ("Stock final (EUR)", round(cout_stk_fin, 2)),
-                    ]:
+                    ]
+                    for lbl, val in recap_lines:
                         ws_res.cell(rr, 1, lbl); ws_res.cell(rr, 2, val)
                         if isinstance(val, (int, float)) and "EUR" in lbl: ws_res.cell(rr, 2).number_format = _EUR
                         elif isinstance(val, int): ws_res.cell(rr, 2).number_format = _NUM
                         rr += 1
                     rr += 1
-                    ws_res.cell(rr, 1, "DÉTAIL PAR CONSTRUCTEUR / CONF").font = _BB14
-                    for ci in range(1, 6): ws_res.cell(rr, ci).fill = _BLEU_F
+                    ws_res.cell(rr, 1, "DÉTAIL PAR CONF / VERSION").font = _BB14
+                    for ci in range(1, 10): ws_res.cell(rr, ci).fill = _BLEU_F
                     rr += 1
-                    for i, h in enumerate(["Constructeur","Conf","Demande de configuration","Nombre de configuration réalisable","Réalisation"], 1):
+                    hdrs_res = ["Constructeur","Conf","Version","Conf|version","Demande (Conf)","Produit (version)","Produit (Conf)","% Réalisation","Restant (Conf)"]
+                    for i, h in enumerate(hdrs_res, 1):
                         ws_res.cell(rr, i, h).font = _BN; ws_res.cell(rr, i).fill = _BLEU_C
                         ws_res.cell(rr, i).alignment = Alignment(horizontal="center")
                     rr += 1
-                    recap = demand_df.groupby(['Constructeur','Conf'] if 'Constructeur' in demand_df.columns else ['Conf']).agg({'Demande':'sum','Qté produite':'sum'}).reset_index()
-                    recap = recap.sort_values(['Constructeur','Conf'] if 'Constructeur' in recap.columns else ['Conf'])
-                    for _, row_data in recap.iterrows():
-                        ws_res.cell(rr, 1, row_data.get('Constructeur',''))
-                        ws_res.cell(rr, 2, row_data.get('Conf',''))
-                        ws_res.cell(rr, 3, int(row_data['Demande'])).number_format = _NUM
-                        ws_res.cell(rr, 4, int(row_data['Qté produite'])).number_format = _NUM
-                        real_pct = row_data['Qté produite'] / row_data['Demande'] * 100 if row_data['Demande'] > 0 else 0
-                        ws_res.cell(rr, 5, f"{real_pct:.1f}%").alignment = Alignment(horizontal="center")
-                        if row_data['Qté produite'] == row_data['Demande']: ws_res.cell(rr, 5).fill = _VERT
-                        elif row_data['Qté produite'] == 0: ws_res.cell(rr, 5).fill = _ROUGE
-                        else: ws_res.cell(rr, 5).fill = _ORANGE
-                        rr += 1
-                    for cl, w in [('A',18),('B',14),('C',14),('D',16),('E',14)]: ws_res.column_dimensions[cl].width = w
+                    _merge_res = [2, 5, 7, 8, 9]
+                    for conf in sorted(demand_conf_map.keys()):
+                        dem = demand_conf_map[conf]
+                        cvs = versions_by_conf[conf]
+                        prod_c = sum(produced.get(cv, 0) for cv in cvs)
+                        rest = dem - prod_c
+                        pct_c = (prod_c / dem * 100) if dem > 0 else 0
+                        rs = rr
+                        for cv in cvs:
+                            qty = produced.get(cv, 0)
+                            vm = df_versions[df_versions['Conf|version'] == cv]
+                            ver = vm['Version'].iloc[0] if not vm.empty else cv.split('|')[0]
+                            cv_cstr = vm['Constructeur'].iloc[0] if not vm.empty else ''
+                            ws_res.cell(rr, 1, cv_cstr)
+                            ws_res.cell(rr, 2, conf)
+                            ws_res.cell(rr, 3, ver)
+                            ws_res.cell(rr, 4, cv)
+                            ws_res.cell(rr, 5, dem).number_format = _NUM
+                            ws_res.cell(rr, 6, qty).number_format = _NUM
+                            ws_res.cell(rr, 7, prod_c).number_format = _NUM
+                            ws_res.cell(rr, 8, f"{pct_c:.1f}%").alignment = Alignment(horizontal="center")
+                            ws_res.cell(rr, 9, rest).number_format = _NUM
+                            rr += 1
+                        re = rr - 1
+                        if re > rs:
+                            for col in _merge_res:
+                                ws_res.merge_cells(start_row=rs, start_column=col, end_row=re, end_column=col)
+                                ws_res.cell(rs, col).alignment = Alignment(horizontal="center", vertical="center")
+                        if rest == 0: ws_res.cell(rs, 9).fill = _VERT
+                        elif rest > 0: ws_res.cell(rs, 9).fill = _ORANGE
+                    for cl, w in [('A',16),('B',14),('C',12),('D',22),('E',14),('F',16),('G',14),('H',14),('I',14)]: ws_res.column_dimensions[cl].width = w
 
                     out_sp = BytesIO(); wb_sp.save(out_sp)
                     ts_sp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -719,8 +881,17 @@ with tab3:
                         df_prio = df_prio.rename(columns={prio_col: 'Priorité'})
                     if 'Priorité' not in df_prio.columns:
                         df_prio['Priorité'] = 1
-                    cols_utiles = ['Constructeur', 'Conf', 'Version', 'Conf|version', 'Priorité', 'Demande']
+                    cols_utiles = ['Constructeur', 'Conf', 'Version', 'Conf|version', 'Priorité', 'Demande', 'Next']
                     df_prio = df_prio[[c for c in cols_utiles if c in df_prio.columns]].copy()
+
+                    # Construire next_map avant filtrage
+                    next_map = {}
+                    if 'Next' in df_prio.columns:
+                        for _, row in df_prio.dropna(subset=['Next']).iterrows():
+                            nxt = str(row['Next']).strip()
+                            if nxt and nxt != 'nan' and nxt != row['Conf|version']:
+                                next_map[row['Conf|version']] = nxt
+
                     df_prio['Demande'] = pd.to_numeric(df_prio['Demande'], errors='coerce').fillna(0).astype(int)
                     df_prio['Priorité'] = pd.to_numeric(df_prio['Priorité'], errors='coerce').fillna(999).astype(int)
                     df_prio = df_prio[df_prio['Demande'] > 0].copy()
@@ -735,16 +906,24 @@ with tab3:
                     all_demands['Demande'] = all_demands['Demande'].clip(lower=0).astype(int)
                     priorities = sorted(all_demands['Priorité'].unique())
 
-                    produced_j1, consumed_j1, cout_j1, stock_after_j1, stock_optim = run_jalon1(
-                        all_demands, bom_df, stock_df, q, priorities, prix_file.getvalue()
+                    produced_j1, consumed_j1, cout_j1, stock_after_j1, stock_optim, produced_next_j1 = run_jalon1(
+                        all_demands, bom_df, stock_df, q, priorities, prix_file.getvalue(), next_map
                     )
 
                     all_demands['J1 produit'] = all_demands.apply(
                         lambda row: produced_j1.get((row['Conf|version'], row['Priorité']), 0), axis=1
                     )
-                    all_demands['Restant J1'] = all_demands['Demande'] - all_demands['J1 produit']
+                    all_demands['J1 Next'] = all_demands.apply(
+                        lambda row: produced_next_j1.get((row['Conf|version'], row['Priorité']), 0), axis=1
+                    )
+                    all_demands['J1 total'] = all_demands['J1 produit'] + all_demands['J1 Next']
+                    all_demands['BOM Next'] = all_demands.apply(
+                        lambda row: next_map.get(row['Conf|version'], '') if produced_next_j1.get((row['Conf|version'], row['Priorité']), 0) > 0 else '', axis=1
+                    )
+                    all_demands['Restant J1'] = all_demands['Demande'] - all_demands['J1 total']
                     total_demande = all_demands['Demande'].sum()
-                    total_j1 = all_demands['J1 produit'].sum()
+                    total_j1 = all_demands['J1 total'].sum()
+                    total_j1_next = all_demands['J1 Next'].sum()
                     pct_j1 = (total_j1 / total_demande * 100) if total_demande > 0 else 0
                     nb_en_rupture = (all_demands['Restant J1'] > 0).sum()
                     val_rupture = (all_demands['Restant J1'] * all_demands['Prix'].fillna(0)).sum()
@@ -760,19 +939,28 @@ with tab3:
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown('<div class="kpi-label">Détail par configuration</div>', unsafe_allow_html=True)
-                    detail_df = all_demands[['Constructeur', 'Conf|version', 'Priorité', 'Demande', 'J1 produit', 'Restant J1']].copy()
-                    detail_df = detail_df.rename(columns={
-                        'Demande': 'Configuration demandée',
-                        'J1 produit': 'Configuration réalisable',
-                        'Restant J1': 'Restant'
-                    })
-                    detail_df['% Réalisé'] = (detail_df['Configuration réalisable'] / detail_df['Configuration demandée'] * 100).round(1)
+                    det_cols3 = ['Constructeur', 'Conf|version', 'Priorité', 'Demande', 'J1 produit']
+                    if total_j1_next > 0:
+                        det_cols3 += ['J1 Next', 'BOM Next', 'J1 total']
+                    det_cols3.append('Restant J1')
+                    detail_df = all_demands[det_cols3].copy()
+                    rename3 = {'Demande': 'Configuration demandée', 'J1 produit': 'Réalisable (BOM originale)', 'Restant J1': 'Restant'}
+                    if total_j1_next > 0:
+                        rename3['J1 Next'] = 'Réalisable (substitution)'
+                        rename3['BOM Next'] = 'BOM substitution'
+                        rename3['J1 total'] = 'Configuration réalisable'
+                        detail_df = detail_df.rename(columns=rename3)
+                        detail_df['% Réalisé'] = (detail_df['Configuration réalisable'] / detail_df['Configuration demandée'] * 100).round(1)
+                    else:
+                        rename3['J1 produit'] = 'Configuration réalisable'
+                        detail_df = detail_df.rename(columns=rename3)
+                        detail_df['% Réalisé'] = (detail_df['Configuration réalisable'] / detail_df['Configuration demandée'] * 100).round(1)
                     st.dataframe(detail_df, use_container_width=True, height=350, hide_index=True)
 
                     if 'Constructeur' in all_demands.columns:
                         st.markdown('<div class="kpi-label">Répartition par constructeur</div>', unsafe_allow_html=True)
                         constr = all_demands.groupby('Constructeur').agg(
-                            Demande=('Demande', 'sum'), Produit=('J1 produit', 'sum')
+                            Demande=('Demande', 'sum'), Produit=('J1 total', 'sum')
                         ).reset_index()
                         constr['Restant'] = constr['Demande'] - constr['Produit']
                         constr['Taux %'] = (constr['Produit'] / constr['Demande'] * 100).round(1).astype(str) + '%'
@@ -818,13 +1006,26 @@ with tab3:
                     wb_ap = Workbook()
 
                     # Préparer un df export avec colonnes renommées
-                    df_ap_exp = all_demands.rename(columns={'J1 produit': 'Qté produite', 'Restant J1': 'Restant'})
+                    df_ap_exp = all_demands.copy()
+                    df_ap_exp['Qté produite'] = df_ap_exp['J1 total']
+                    df_ap_exp['Restant'] = df_ap_exp['Restant J1']
 
                     # ---- Onglet 1 : Demandes ----
                     ws_dem2 = wb_ap.active; ws_dem2.title = "Demandes"
-                    cols_exp2 = [c for c in ['Constructeur','Conf','Version','Priorité','Demande','Qté produite','Restant'] if c in df_ap_exp.columns]
+                    cols_exp2 = ['Constructeur','Conf','Version','Priorité','Demande','J1 produit']
+                    if total_j1_next > 0:
+                        cols_exp2 += ['J1 Next', 'BOM Next', 'J1 total']
+                    cols_exp2.append('Restant J1')
+                    cols_exp2 = [c for c in cols_exp2 if c in df_ap_exp.columns]
                     df_exp2 = df_ap_exp[cols_exp2].copy()
-                    df_exp2 = df_exp2.rename(columns={'Demande': 'Demande de configuration', 'Qté produite': 'Nombre de configuration réalisable'})
+                    rename_dem2 = {'Demande': 'Demande de configuration', 'J1 produit': 'Nb réalisable (BOM originale)', 'Restant J1': 'Restant'}
+                    if total_j1_next > 0:
+                        rename_dem2['J1 Next'] = 'Nb réalisable (substitution)'
+                        rename_dem2['BOM Next'] = 'BOM substitution'
+                        rename_dem2['J1 total'] = 'Nombre de configuration réalisable'
+                    else:
+                        rename_dem2['J1 produit'] = 'Nombre de configuration réalisable'
+                    df_exp2 = df_exp2.rename(columns=rename_dem2)
                     df_exp2 = df_exp2.sort_values(['Constructeur','Priorité'] if 'Constructeur' in df_exp2.columns else ['Priorité'])
                     for rr in dataframe_to_rows(df_exp2, index=False, header=True): ws_dem2.append(rr)
                     tot_row2 = ws_dem2.max_row + 1
@@ -892,15 +1093,20 @@ with tab3:
                     rr2 = 3
                     cout_stk_init2 = float((stock_optim['NVX STOCK'] * stock_optim['Prix (pj)']).sum())
                     cout_stk_fin2 = cout_stk_init2 - cout_j1
-                    for lbl, val in [
+                    recap_lines2 = [
                         ("Total de conf demandé", int(total_demande)),
                         ("Total de conf réalisable", int(total_j1)),
+                    ]
+                    if total_j1_next > 0:
+                        recap_lines2.append(("  dont via substitution (Next)", int(total_j1_next)))
+                    recap_lines2 += [
                         ("% Réalisation", f"{pct_j1:.1f}%"),
                         ("Restant", int(total_demande - total_j1)),
                         ("Stock initial (EUR)", round(cout_stk_init2, 2)),
                         ("Stock consommable", round(cout_j1, 2)),
                         ("Stock final (EUR)", round(cout_stk_fin2, 2)),
-                    ]:
+                    ]
+                    for lbl, val in recap_lines2:
                         ws_res2.cell(rr2, 1, lbl); ws_res2.cell(rr2, 2, val)
                         if isinstance(val, (int, float)) and "EUR" in lbl: ws_res2.cell(rr2, 2).number_format = _EUR2
                         elif isinstance(val, int): ws_res2.cell(rr2, 2).number_format = _NUM2
@@ -937,11 +1143,13 @@ with tab3:
                         'all_demands': all_demands,
                         'stock_optim': stock_optim,
                         'produced_j1': produced_j1,
+                        'produced_next_j1': produced_next_j1,
                         'consumed_j1': consumed_j1,
                         'cout_j1': cout_j1,
                         'q': q,
                         'priorities': priorities,
                         'stock_after_j1': stock_after_j1,
+                        'next_map': next_map,
                     }
 
                 except Exception as e:
@@ -997,8 +1205,17 @@ with tab4:
                         df_prio = df_prio.rename(columns={prio_col: 'Priorité'})
                     if 'Priorité' not in df_prio.columns:
                         df_prio['Priorité'] = 1
-                    cols_utiles = ['Constructeur', 'Conf', 'Version', 'Conf|version', 'Priorité', 'Demande']
+                    cols_utiles = ['Constructeur', 'Conf', 'Version', 'Conf|version', 'Priorité', 'Demande', 'Next']
                     df_prio = df_prio[[c for c in cols_utiles if c in df_prio.columns]].copy()
+
+                    # Construire next_map avant filtrage
+                    next_map = {}
+                    if 'Next' in df_prio.columns:
+                        for _, row in df_prio.dropna(subset=['Next']).iterrows():
+                            nxt = str(row['Next']).strip()
+                            if nxt and nxt != 'nan' and nxt != row['Conf|version']:
+                                next_map[row['Conf|version']] = nxt
+
                     df_prio['Demande'] = pd.to_numeric(df_prio['Demande'], errors='coerce').fillna(0).astype(int)
                     df_prio['Priorité'] = pd.to_numeric(df_prio['Priorité'], errors='coerce').fillna(999).astype(int)
                     df_prio = df_prio[df_prio['Demande'] > 0].copy()
@@ -1018,24 +1235,37 @@ with tab4:
                     if has_j1:
                         j1_data = st.session_state['j1_avec_result']
                         produced_j1 = j1_data['produced_j1']
+                        produced_next_j1 = j1_data.get('produced_next_j1', {})
                         consumed_j1 = j1_data['consumed_j1']
                         cout_j1 = j1_data['cout_j1']
                         stock_j2 = j1_data['stock_after_j1'].copy()
                         stock_optim = j1_data['stock_optim']
+                        next_map_j1 = j1_data.get('next_map', next_map)
                         all_demands['J1 produit'] = all_demands.apply(
                             lambda row: produced_j1.get((row['Conf|version'], row['Priorité']), 0), axis=1
+                        )
+                        all_demands['J1 Next'] = all_demands.apply(
+                            lambda row: produced_next_j1.get((row['Conf|version'], row['Priorité']), 0), axis=1
                         )
                     else:
-                        produced_j1, consumed_j1, cout_j1, stock_j2, stock_optim = run_jalon1(
-                            all_demands, bom_df, stock_df, q, priorities, prix_file.getvalue()
+                        produced_j1, consumed_j1, cout_j1, stock_j2, stock_optim, produced_next_j1 = run_jalon1(
+                            all_demands, bom_df, stock_df, q, priorities, prix_file.getvalue(), next_map
                         )
                         all_demands['J1 produit'] = all_demands.apply(
                             lambda row: produced_j1.get((row['Conf|version'], row['Priorité']), 0), axis=1
                         )
+                        all_demands['J1 Next'] = all_demands.apply(
+                            lambda row: produced_next_j1.get((row['Conf|version'], row['Priorité']), 0), axis=1
+                        )
 
-                    all_demands['Restant J1'] = all_demands['Demande'] - all_demands['J1 produit']
+                    all_demands['J1 total'] = all_demands['J1 produit'] + all_demands['J1 Next']
+                    all_demands['BOM Next J1'] = all_demands.apply(
+                        lambda row: next_map.get(row['Conf|version'], '') if produced_next_j1.get((row['Conf|version'], row['Priorité']), 0) > 0 else '', axis=1
+                    )
+                    all_demands['Restant J1'] = all_demands['Demande'] - all_demands['J1 total']
                     total_demande = all_demands['Demande'].sum()
-                    total_j1 = all_demands['J1 produit'].sum()
+                    total_j1 = all_demands['J1 total'].sum()
+                    total_j1_next = all_demands['J1 Next'].sum()
                     pct_j1 = (total_j1 / total_demande * 100) if total_demande > 0 else 0
 
                     # ---- JALON 2 ----
@@ -1190,6 +1420,85 @@ with tab4:
                                                       'Prix conf': prix_configs[cv], 'Cout achat': round(cout_refs_necessaire, 2),
                                                       'Cout moyen/conf': round(cout_refs_necessaire, 2),
                                                       '% du prix': round(pct_cout, 1), 'Statut': 'Bloque'})
+                            # --- Substitution Next pour J2 (seuil/prio) ---
+                            if next_map:
+                                next_j2_cand = {}
+                                for cv in configs_prio:
+                                    rem = restant.get((cv, prio), 0)
+                                    if rem > 0 and cv in next_map:
+                                        ncv = next_map[cv]
+                                        if ncv in q.index and cv in prix_configs:
+                                            next_j2_cand[cv] = (ncv, rem)
+                                if next_j2_cand:
+                                    next_refs_j2 = sorted(set(ref for cv, (ncv, _) in next_j2_cand.items() for ref in q.columns if q.at[ncv, ref] > 0))
+                                    next_bom_j2 = {cv: {ref: q.at[ncv, ref] for ref in q.columns if q.at[ncv, ref] > 0} for cv, (ncv, _) in next_j2_cand.items()}
+                                    prob_nj1 = LpProblem(f"NextJ2_S{seuil_pct}_P{prio}_Max", LpMaximize)
+                                    XNv, SNv, BNv = {}, {}, {}
+                                    for cv, (ncv, rem) in next_j2_cand.items():
+                                        XNv[cv] = LpVariable(f"XN_{sname(cv)}_s{seuil_pct}", 0, rem, LpInteger)
+                                        for ref, bom_qty in next_bom_j2[cv].items():
+                                            SNv[(cv, ref)] = LpVariable(f"SN_{sname(cv)}_{sname(ref)}_s{seuil_pct}", 0)
+                                            BNv[(cv, ref)] = LpVariable(f"BN_{sname(cv)}_{sname(ref)}_s{seuil_pct}", 0)
+                                            prob_nj1 += SNv[(cv, ref)] + BNv[(cv, ref)] == bom_qty * XNv[cv]
+                                    prob_nj1 += lpSum(XNv.values())
+                                    for ref in next_refs_j2:
+                                        s_vars = [SNv[(cv, ref)] for cv in next_j2_cand if (cv, ref) in SNv]
+                                        if s_vars:
+                                            dispo = max(0, float(stock_j2[ref])) if ref in stock_j2.index else 0
+                                            prob_nj1 += lpSum(s_vars) <= dispo
+                                    for cv in next_j2_cand:
+                                        budget_cv = seuil * prix_configs[cv]
+                                        cout_cv = lpSum(BNv[(cv, ref)] * ref_to_prix.get(ref, 0) for ref in next_bom_j2[cv] if (cv, ref) in BNv)
+                                        prob_nj1 += cout_cv <= budget_cv * XNv[cv]
+                                    prob_nj1.solve(PULP_CBC_CMD(msg=0, gapRel=0.0))
+                                    max_n_next = int(round(value(prob_nj1.objective) or 0))
+                                    if max_n_next > 0:
+                                        prob_nj2 = LpProblem(f"NextJ2_S{seuil_pct}_P{prio}_Min", LpMinimize)
+                                        XN2, SN2, BN2 = {}, {}, {}
+                                        for cv, (ncv, rem) in next_j2_cand.items():
+                                            XN2[cv] = LpVariable(f"XN2_{sname(cv)}_s{seuil_pct}", 0, rem, LpInteger)
+                                            for ref, bom_qty in next_bom_j2[cv].items():
+                                                SN2[(cv, ref)] = LpVariable(f"SN2_{sname(cv)}_{sname(ref)}_s{seuil_pct}", 0)
+                                                BN2[(cv, ref)] = LpVariable(f"BN2_{sname(cv)}_{sname(ref)}_s{seuil_pct}", 0)
+                                                prob_nj2 += SN2[(cv, ref)] + BN2[(cv, ref)] == bom_qty * XN2[cv]
+                                        prob_nj2 += lpSum(BN2[(cv, ref)] * ref_to_prix.get(ref, 0)
+                                                         for cv in next_j2_cand for ref in next_bom_j2[cv] if (cv, ref) in BN2)
+                                        prob_nj2 += lpSum(XN2.values()) == max_n_next
+                                        for ref in next_refs_j2:
+                                            s_vars = [SN2[(cv, ref)] for cv in next_j2_cand if (cv, ref) in SN2]
+                                            if s_vars:
+                                                dispo = max(0, float(stock_j2[ref])) if ref in stock_j2.index else 0
+                                                prob_nj2 += lpSum(s_vars) <= dispo
+                                        for cv in next_j2_cand:
+                                            budget_cv = seuil * prix_configs[cv]
+                                            cout_cv = lpSum(BN2[(cv, ref)] * ref_to_prix.get(ref, 0) for ref in next_bom_j2[cv] if (cv, ref) in BN2)
+                                            prob_nj2 += cout_cv <= budget_cv * XN2[cv]
+                                        prob_nj2.solve(PULP_CBC_CMD(msg=0, gapRel=0.01))
+                                        for cv in next_j2_cand:
+                                            qty_n = int(round(lp_val(XN2[cv])))
+                                            if qty_n > 0:
+                                                cout_achat_n = sum(lp_val(BN2[(cv, ref)]) * ref_to_prix.get(ref, 0) for ref in next_bom_j2[cv] if (cv, ref) in BN2)
+                                                pct_moy_n = (cout_achat_n / (prix_configs[cv] * qty_n) * 100) if prix_configs[cv] > 0 else 0
+                                                restant[(cv, prio)] -= qty_n
+                                                total_seuil += qty_n
+                                                cout_seuil += cout_achat_n
+                                                for ref in next_bom_j2[cv]:
+                                                    if (cv, ref) in SN2:
+                                                        used = round(lp_val(SN2[(cv, ref)]), 4)
+                                                        if used > 0 and ref in stock_j2.index:
+                                                            stock_j2[ref] -= used
+                                                            consumed_j2[ref] = consumed_j2.get(ref, 0) + used
+                                                    if (cv, ref) in BN2:
+                                                        bought = round(lp_val(BN2[(cv, ref)]), 4)
+                                                        if bought > 0:
+                                                            achats_j2[ref] = achats_j2.get(ref, 0) + bought
+                                                ncv = next_j2_cand[cv][0]
+                                                detail_j2.append({'Seuil': f"{seuil_pct}%", 'Priorité': prio, 'Conf|version': cv,
+                                                                  'Nb produit': qty_n, 'Demande restante': next_j2_cand[cv][1],
+                                                                  'Prix conf': prix_configs[cv], 'Cout achat': round(cout_achat_n, 2),
+                                                                  'Cout moyen/conf': round(cout_achat_n / qty_n, 2),
+                                                                  '% du prix': round(pct_moy_n, 1), 'Statut': f'Produit (Next: {ncv})'})
+
                             for cv in sans_prix_prio:
                                 detail_j2.append({'Seuil': f"{seuil_pct}%", 'Priorité': prio, 'Conf|version': cv,
                                                   'Nb produit': 0, 'Demande restante': restant.get((cv, prio), 0),
@@ -1227,6 +1536,8 @@ with tab4:
                                    'Coût achat réf. unitaire': '0',
                                    'Cumul des conf réalisable': int(total_j1),
                                    'Taux réalisable': f"{pct_j1:.1f}%"}]
+                    if total_j1_next > 0:
+                        seuil_rows[0]['Etape'] = f"Opti du réemploi (dont {int(total_j1_next)} via Next)"
                     for s_pct in [20, 40, 60, 80]:
                         prod = j2_prod_par_seuil.get(s_pct, 0)
                         cout = j2_cout_par_seuil.get(s_pct, 0)
@@ -1246,7 +1557,7 @@ with tab4:
                         # Calculer J1 par constructeur
                         j1_constr = all_demands.groupby('Constructeur').agg(
                             Demande_totale=('Demande', 'sum'),
-                            J1_produit=('J1 produit', 'sum')
+                            J1_produit=('J1 total', 'sum')
                         ).reset_index()
 
                         # Calculer J2 par constructeur depuis detail_j2
@@ -1325,14 +1636,20 @@ with tab4:
                         all_demands[f'{s_pct}%'] = 0
                         all_demands[f'Cout {s_pct}%'] = 0.0
                     for d in detail_j2:
-                        if d['Statut'] == 'Produit':
+                        if d['Statut'].startswith('Produit'):
                             mask = (all_demands['Conf|version'] == d['Conf|version']) & (all_demands['Priorité'] == d['Priorité'])
                             s_col = d['Seuil']
                             all_demands.loc[mask, s_col] = all_demands.loc[mask, s_col] + d['Nb produit']
                             all_demands.loc[mask, f"Cout {d['Seuil']}"] = all_demands.loc[mask, f"Cout {d['Seuil']}"] + (d['Cout achat'] or 0)
 
-                    all_demands_xls = all_demands.rename(columns={'J1 produit': 'Opti réemploi'})
-                    all_demands_xls['Total'] = (all_demands_xls['Opti réemploi'] + all_demands_xls['20%'] + all_demands_xls['40%'] + all_demands_xls['60%'] + all_demands_xls['80%'])
+                    all_demands_xls = all_demands.rename(columns={'J1 produit': 'Opti réemploi', 'J1 Next': 'Opti Next'})
+                    all_demands_xls['BOM Next'] = all_demands_xls.apply(
+                        lambda row: next_map.get(row['Conf|version'], '') if row.get('Opti Next', 0) > 0 else '', axis=1
+                    )
+                    _opti_next = all_demands_xls['Opti Next'] if 'Opti Next' in all_demands_xls.columns else 0
+                    all_demands_xls['Total'] = (all_demands_xls['Opti réemploi'] + _opti_next
+                                                + all_demands_xls['20%'] + all_demands_xls['40%']
+                                                + all_demands_xls['60%'] + all_demands_xls['80%'])
                     all_demands_xls['Restant'] = all_demands_xls['Demande'] - all_demands_xls['Total']
                     all_demands_xls['RUPTURE'] = all_demands_xls['Restant'].apply(lambda x: 'OUI' if x > 0 else '')
                     all_demands_xls['Cout conf restantes'] = all_demands_xls['Restant'] * all_demands_xls['Prix'].fillna(0)
@@ -1343,6 +1660,8 @@ with tab4:
                         for s in [20, 40, 60, 80]:
                             if row[f'{s}%'] > 0: last = s
                         if last is None:
+                            if row.get('Opti Next', 0) > 0:
+                                return 'apres substitution Next'
                             return 'apres Opti réemploi' if row['Opti réemploi'] > 0 else 'des le depart'
                         seuils_list = [20, 40, 60, 80]
                         idx = seuils_list.index(last)
@@ -1422,7 +1741,7 @@ with tab4:
                     # Calculs économies J2
                     cout_j2_si_complet_par_seuil = {20: 0.0, 40: 0.0, 60: 0.0, 80: 0.0}
                     for d in detail_j2:
-                        if d['Statut'] == 'Produit':
+                        if d['Statut'].startswith('Produit'):
                             sn = int(d['Seuil'].replace('%',''))
                             cout_j2_si_complet_par_seuil[sn] += d['Nb produit'] * prix_configs.get(d['Conf|version'], 0)
                     cout_j2_si_complet = sum(cout_j2_si_complet_par_seuil.values())
@@ -1436,9 +1755,16 @@ with tab4:
                     ws_r.cell(r_row, 1, "OPTIMISATION DU RÉEMPLOI - Production avec stock existant")
                     for ci in range(1, 6): ws_r.cell(r_row, ci).font = BOLD_NOIR; ws_r.cell(r_row, ci).fill = BLEU_CLAIR
                     r_row += 1
+                    _opti_next_si = all_demands_xls['Opti Next'] if 'Opti Next' in all_demands_xls.columns else 0
+                    cout_j1_si_complet = float(((all_demands_xls['Opti réemploi'] + _opti_next_si) * all_demands_xls['Prix'].fillna(0)).sum())
                     ws_r.cell(r_row, 1, "  Configs réalisables"); ws_r.cell(r_row, 2, total_j1).number_format = NUM_FMT
                     ws_r.cell(r_row, 3, f"{pct_j1:.1f}%"); ws_r.cell(r_row, 4, cout_j1).number_format = EURO_FMT
-                    r_row += 2
+                    r_row += 1
+                    if total_j1_next > 0:
+                        ws_r.cell(r_row, 1, "    dont via substitution (Next)")
+                        ws_r.cell(r_row, 2, int(total_j1_next)).number_format = NUM_FMT
+                        r_row += 1
+                    r_row += 1
 
                     # Achat de références
                     ws_r.cell(r_row, 1, "ACHAT DE RÉFÉRENCES - Production avec achats de references unitaires")
@@ -1474,9 +1800,9 @@ with tab4:
 
                     # -- Section B : Detail par priorité --
                     ws_r.cell(r_row, 1, "DETAIL PAR PRIORITE").font = BOLD_BLANC_14
-                    for ci in range(1, 9): ws_r.cell(r_row, ci).fill = BLEU_FONCE
+                    for ci in range(1, 10): ws_r.cell(r_row, ci).fill = BLEU_FONCE
                     r_row += 1
-                    for i, h in enumerate(["Priorite","Demande","Opti réemploi","J2 Total","Cout J2","Total","Restant","% couvert"], 1):
+                    for i, h in enumerate(["Priorite","Demande","Opti réemploi","Opti Next","J2 Total","Cout J2","Total","Restant","% couvert"], 1):
                         ws_r.cell(r_row, i, h).font = BOLD_NOIR; ws_r.cell(r_row, i).fill = BLEU_CLAIR
                         ws_r.cell(r_row, i).alignment = Alignment(horizontal="center")
                     r_row += 1
@@ -1484,21 +1810,23 @@ with tab4:
                         prio_data = all_demands_xls[all_demands_xls['Priorité'] == prio]
                         dem_p = int(prio_data['Demande'].sum())
                         j1_p  = int(prio_data['Opti réemploi'].sum())
+                        j1_next_p = int(prio_data['Opti Next'].sum()) if 'Opti Next' in prio_data.columns else 0
                         j2_p  = int(prio_data[['20%','40%','60%','80%']].sum().sum())
                         cout_j2_p = prio_data[['Cout 20%','Cout 40%','Cout 60%','Cout 80%']].sum().sum()
-                        tot_p = j1_p + j2_p; rest_p = dem_p - tot_p
+                        tot_p = j1_p + j1_next_p + j2_p; rest_p = dem_p - tot_p
                         pct_p = f"{tot_p/dem_p*100:.0f}%" if dem_p > 0 else "0%"
                         ws_r.cell(r_row, 1, prio).alignment = Alignment(horizontal="center")
                         ws_r.cell(r_row, 2, dem_p).number_format = NUM_FMT
                         ws_r.cell(r_row, 3, j1_p).number_format = NUM_FMT
-                        ws_r.cell(r_row, 4, j2_p).number_format = NUM_FMT
-                        ws_r.cell(r_row, 5, round(cout_j2_p, 2)).number_format = EURO_FMT
-                        ws_r.cell(r_row, 6, tot_p).number_format = NUM_FMT
-                        ws_r.cell(r_row, 7, rest_p).number_format = NUM_FMT
-                        ws_r.cell(r_row, 8, pct_p).alignment = Alignment(horizontal="center")
-                        if tot_p == dem_p: ws_r.cell(r_row, 8).fill = VERT
-                        elif tot_p == 0: ws_r.cell(r_row, 8).fill = ROUGE
-                        else: ws_r.cell(r_row, 8).fill = ORANGE
+                        ws_r.cell(r_row, 4, j1_next_p).number_format = NUM_FMT
+                        ws_r.cell(r_row, 5, j2_p).number_format = NUM_FMT
+                        ws_r.cell(r_row, 6, round(cout_j2_p, 2)).number_format = EURO_FMT
+                        ws_r.cell(r_row, 7, tot_p).number_format = NUM_FMT
+                        ws_r.cell(r_row, 8, rest_p).number_format = NUM_FMT
+                        ws_r.cell(r_row, 9, pct_p).alignment = Alignment(horizontal="center")
+                        if tot_p == dem_p: ws_r.cell(r_row, 9).fill = VERT
+                        elif tot_p == 0: ws_r.cell(r_row, 9).fill = ROUGE
+                        else: ws_r.cell(r_row, 9).fill = ORANGE
                         r_row += 1
 
                     # -- Section C : Detail par configuration --
@@ -1507,7 +1835,8 @@ with tab4:
                     for ci in range(1, 22): ws_r.cell(r_row, ci).fill = BLEU_FONCE
                     r_row += 1
                     cols_cfg = [c for c in ['Constructeur','Conf','Version','Conf|version','Priorité','Demande','Prix',
-                                            'Opti réemploi','20%','Cout 20%','40%','Cout 40%','60%','Cout 60%','80%','Cout 80%',
+                                            'Opti réemploi','Opti Next','BOM Next',
+                                            '20%','Cout 20%','40%','Cout 40%','60%','Cout 60%','80%','Cout 80%',
                                             'Total','Restant','RUPTURE','Seuil rupture','Cout conf restantes'] if c in all_demands_xls.columns]
                     for i, h in enumerate(cols_cfg, 1):
                         ws_r.cell(r_row, i, h).font = BOLD_NOIR; ws_r.cell(r_row, i).fill = BLEU_CLAIR
@@ -1521,7 +1850,7 @@ with tab4:
                     # Ligne TOTAL
                     ws_r.cell(r_row, 1, "TOTAL")
                     cidx_cfg = {cols_cfg[i]: i+1 for i in range(len(cols_cfg))}
-                    for cn in ['Demande','Opti réemploi','20%','Cout 20%','40%','Cout 40%','60%','Cout 60%','80%','Cout 80%','Total','Restant','Cout conf restantes']:
+                    for cn in ['Demande','Opti réemploi','Opti Next','20%','Cout 20%','40%','Cout 40%','60%','Cout 60%','80%','Cout 80%','Total','Restant','Cout conf restantes']:
                         if cn in cidx_cfg: ws_r.cell(r_row, cidx_cfg[cn], df_cfg[cn].sum())
                     ligne_total_j2(ws_r, r_row, len(cols_cfg))
                     # Formatage Section C
@@ -1529,7 +1858,7 @@ with tab4:
                         for ci in range(1, len(cols_cfg)+1):
                             cell = ws_r.cell(rn, ci); h = cols_cfg[ci-1]
                             if h in ['Prix','Cout 20%','Cout 40%','Cout 60%','Cout 80%','Cout conf restantes'] and isinstance(cell.value, (int, float)): cell.number_format = EURO_FMT
-                            elif h in ['Demande','Opti réemploi','20%','40%','60%','80%','Total','Restant'] and isinstance(cell.value, (int, float)): cell.number_format = NUM_FMT
+                            elif h in ['Demande','Opti réemploi','Opti Next','20%','40%','60%','80%','Total','Restant'] and isinstance(cell.value, (int, float)): cell.number_format = NUM_FMT
                     if 'RUPTURE' in cidx_cfg:
                         for rn in range(start_cfg, r_row):
                             c = ws_r.cell(rn, cidx_cfg['RUPTURE'])
@@ -1607,7 +1936,7 @@ with tab4:
                         if col_stat:
                             for rn in range(2, ws_j2.max_row):
                                 c = ws_j2.cell(rn, col_stat)
-                                if c.value == 'Produit': c.fill = VERT
+                                if c.value and str(c.value).startswith('Produit'): c.fill = VERT
                                 elif c.value == 'Bloque': c.fill = ORANGE
                                 elif c.value == 'Pas de prix': c.fill = GRIS
                         # Bonus : detail refs achetées par config
