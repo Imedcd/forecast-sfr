@@ -1606,6 +1606,27 @@ with tab4:
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown('<div class="kpi-label">Configuration réalisable par seuil</div>', unsafe_allow_html=True)
+
+                    # Compter les substitutions Next dans J2 par seuil
+                    next_j2_par_seuil = {}
+                    next_j2_details = []
+                    for d in detail_j2:
+                        if d['Statut'].startswith('Produit (Next:'):
+                            s_val = d['Seuil'].replace('%', '')
+                            s_int = int(s_val)
+                            next_j2_par_seuil[s_int] = next_j2_par_seuil.get(s_int, 0) + d['Nb produit']
+                            # Extraire le BOM Next du statut
+                            bom_next = d['Statut'].replace('Produit (Next: ', '').rstrip(')')
+                            next_j2_details.append({
+                                'Conf|version': d['Conf|version'],
+                                'BOM substitution': bom_next,
+                                'Seuil': d['Seuil'],
+                                'Priorité': d['Priorité'],
+                                'Nb produit': d['Nb produit'],
+                                'Coût achat': d['Cout achat'],
+                            })
+                    total_next_j2 = sum(next_j2_par_seuil.values())
+
                     cumul = total_j1
                     seuil_rows = [{'Etape': 'Opti du réemploi', 'Config réalisable': int(total_j1),
                                    'Coût stock consommable': f"{cout_j1:,.0f}".replace(',', ' '),
@@ -1618,12 +1639,48 @@ with tab4:
                         prod = j2_prod_par_seuil.get(s_pct, 0)
                         cout = j2_cout_par_seuil.get(s_pct, 0)
                         cumul += prod
-                        seuil_rows.append({'Etape': f'Seuil {s_pct}%', 'Config réalisable': int(prod),
+                        etape_label = f'Seuil {s_pct}%'
+                        next_count = next_j2_par_seuil.get(s_pct, 0)
+                        if next_count > 0:
+                            etape_label = f'Seuil {s_pct}% (dont {int(next_count)} via Next)'
+                        seuil_rows.append({'Etape': etape_label, 'Config réalisable': int(prod),
                                            'Coût stock consommable': '0',
                                            'Coût achat réf. unitaire': f"{cout:,.0f}".replace(',', ' '),
                                            'Cumul des conf réalisable': int(cumul),
                                            'Taux réalisable': f"{(cumul/total_demande*100):.1f}%"})
                     st.dataframe(pd.DataFrame(seuil_rows), use_container_width=True, hide_index=True)
+
+                    # ---- DETAIL DES SUBSTITUTIONS (NEXT) ----
+                    total_next_all = int(total_j1_next) + total_next_j2
+                    if total_next_all > 0:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        st.markdown(f'<div class="kpi-label">Configurations produites via substitution (Next) — {int(total_next_all)} au total</div>', unsafe_allow_html=True)
+
+                        # J1 Next
+                        next_j1_rows = []
+                        if total_j1_next > 0:
+                            for _, row in all_demands.iterrows():
+                                if row['J1 Next'] > 0:
+                                    next_j1_rows.append({
+                                        'Conf|version': row['Conf|version'],
+                                        'BOM substitution': row['BOM Next J1'],
+                                        'Etape': 'Réemploi (J1)',
+                                        'Priorité': row['Priorité'],
+                                        'Nb produit': int(row['J1 Next']),
+                                        'Coût achat': 0,
+                                    })
+
+                        all_next_rows = next_j1_rows + next_j2_details
+                        df_next = pd.DataFrame(all_next_rows)
+                        df_next = df_next.rename(columns={'Nb produit': 'Qté produite', 'Coût achat': 'Coût achat (€)'})
+                        if 'Seuil' in df_next.columns:
+                            df_next['Etape'] = df_next['Etape'].fillna('')
+                            mask_j2 = df_next['Etape'] == ''
+                            df_next.loc[mask_j2, 'Etape'] = 'Seuil ' + df_next.loc[mask_j2, 'Seuil'].astype(str)
+                            df_next = df_next.drop(columns=['Seuil'])
+                        display_cols = ['Conf|version', 'BOM substitution', 'Etape', 'Priorité', 'Qté produite', 'Coût achat (€)']
+                        display_cols = [c for c in display_cols if c in df_next.columns]
+                        st.dataframe(df_next[display_cols], use_container_width=True, hide_index=True)
 
                     # ---- RÉPARTITION PAR CONSTRUCTEUR ----
                     if 'Constructeur' in all_demands.columns:
