@@ -1637,12 +1637,8 @@ with tab4:
                             all_demands.loc[mask, s_col] = all_demands.loc[mask, s_col] + d['Nb produit']
                             all_demands.loc[mask, f"Cout {d['Seuil']}"] = all_demands.loc[mask, f"Cout {d['Seuil']}"] + (d['Cout achat'] or 0)
 
-                    all_demands_xls = all_demands.rename(columns={'J1 produit': 'Opti réemploi', 'J1 Next': 'Opti Next'})
-                    all_demands_xls['BOM Next'] = all_demands_xls.apply(
-                        lambda row: next_map.get(row['Conf|version'], '') if row.get('Opti Next', 0) > 0 else '', axis=1
-                    )
-                    _opti_next = all_demands_xls['Opti Next'] if 'Opti Next' in all_demands_xls.columns else 0
-                    all_demands_xls['Total'] = (all_demands_xls['Opti réemploi'] + _opti_next
+                    all_demands_xls = all_demands.rename(columns={'J1 total': 'Opti réemploi'})
+                    all_demands_xls['Total'] = (all_demands_xls['Opti réemploi']
                                                 + all_demands_xls['20%'] + all_demands_xls['40%']
                                                 + all_demands_xls['60%'] + all_demands_xls['80%'])
                     all_demands_xls['Restant'] = all_demands_xls['Demande'] - all_demands_xls['Total']
@@ -1655,8 +1651,6 @@ with tab4:
                         for s in [20, 40, 60, 80]:
                             if row[f'{s}%'] > 0: last = s
                         if last is None:
-                            if row.get('Opti Next', 0) > 0:
-                                return 'apres substitution Next'
                             return 'apres Opti réemploi' if row['Opti réemploi'] > 0 else 'des le depart'
                         seuils_list = [20, 40, 60, 80]
                         idx = seuils_list.index(last)
@@ -1750,16 +1744,10 @@ with tab4:
                     ws_r.cell(r_row, 1, "OPTIMISATION DU RÉEMPLOI - Production avec stock existant")
                     for ci in range(1, 6): ws_r.cell(r_row, ci).font = BOLD_NOIR; ws_r.cell(r_row, ci).fill = BLEU_CLAIR
                     r_row += 1
-                    _opti_next_si = all_demands_xls['Opti Next'] if 'Opti Next' in all_demands_xls.columns else 0
-                    cout_j1_si_complet = float(((all_demands_xls['Opti réemploi'] + _opti_next_si) * all_demands_xls['Prix'].fillna(0)).sum())
+                    cout_j1_si_complet = float((all_demands_xls['Opti réemploi'] * all_demands_xls['Prix'].fillna(0)).sum())
                     ws_r.cell(r_row, 1, "  Configs réalisables"); ws_r.cell(r_row, 2, total_j1).number_format = NUM_FMT
                     ws_r.cell(r_row, 3, f"{pct_j1:.1f}%"); ws_r.cell(r_row, 4, cout_j1).number_format = EURO_FMT
-                    r_row += 1
-                    if total_j1_next > 0:
-                        ws_r.cell(r_row, 1, "    dont via substitution (Next)")
-                        ws_r.cell(r_row, 2, int(total_j1_next)).number_format = NUM_FMT
-                        r_row += 1
-                    r_row += 1
+                    r_row += 2
 
                     # Achat de références
                     ws_r.cell(r_row, 1, "ACHAT DE RÉFÉRENCES - Production avec achats de references unitaires")
@@ -1797,7 +1785,7 @@ with tab4:
                     ws_r.cell(r_row, 1, "DETAIL PAR PRIORITE").font = BOLD_BLANC_14
                     for ci in range(1, 10): ws_r.cell(r_row, ci).fill = BLEU_FONCE
                     r_row += 1
-                    for i, h in enumerate(["Priorite","Demande","Opti réemploi","Opti Next","J2 Total","Cout J2","Total","Restant","% couvert"], 1):
+                    for i, h in enumerate(["Priorite","Demande","Opti réemploi","J2 Total","Cout J2","Total","Restant","% couvert"], 1):
                         ws_r.cell(r_row, i, h).font = BOLD_NOIR; ws_r.cell(r_row, i).fill = BLEU_CLAIR
                         ws_r.cell(r_row, i).alignment = Alignment(horizontal="center")
                     r_row += 1
@@ -1805,23 +1793,21 @@ with tab4:
                         prio_data = all_demands_xls[all_demands_xls['Priorité'] == prio]
                         dem_p = int(prio_data['Demande'].sum())
                         j1_p  = int(prio_data['Opti réemploi'].sum())
-                        j1_next_p = int(prio_data['Opti Next'].sum()) if 'Opti Next' in prio_data.columns else 0
                         j2_p  = int(prio_data[['20%','40%','60%','80%']].sum().sum())
                         cout_j2_p = prio_data[['Cout 20%','Cout 40%','Cout 60%','Cout 80%']].sum().sum()
-                        tot_p = j1_p + j1_next_p + j2_p; rest_p = dem_p - tot_p
+                        tot_p = j1_p + j2_p; rest_p = dem_p - tot_p
                         pct_p = f"{tot_p/dem_p*100:.0f}%" if dem_p > 0 else "0%"
                         ws_r.cell(r_row, 1, prio).alignment = Alignment(horizontal="center")
                         ws_r.cell(r_row, 2, dem_p).number_format = NUM_FMT
                         ws_r.cell(r_row, 3, j1_p).number_format = NUM_FMT
-                        ws_r.cell(r_row, 4, j1_next_p).number_format = NUM_FMT
-                        ws_r.cell(r_row, 5, j2_p).number_format = NUM_FMT
-                        ws_r.cell(r_row, 6, round(cout_j2_p, 2)).number_format = EURO_FMT
-                        ws_r.cell(r_row, 7, tot_p).number_format = NUM_FMT
-                        ws_r.cell(r_row, 8, rest_p).number_format = NUM_FMT
-                        ws_r.cell(r_row, 9, pct_p).alignment = Alignment(horizontal="center")
-                        if tot_p == dem_p: ws_r.cell(r_row, 9).fill = VERT
-                        elif tot_p == 0: ws_r.cell(r_row, 9).fill = ROUGE
-                        else: ws_r.cell(r_row, 9).fill = ORANGE
+                        ws_r.cell(r_row, 4, j2_p).number_format = NUM_FMT
+                        ws_r.cell(r_row, 5, round(cout_j2_p, 2)).number_format = EURO_FMT
+                        ws_r.cell(r_row, 6, tot_p).number_format = NUM_FMT
+                        ws_r.cell(r_row, 7, rest_p).number_format = NUM_FMT
+                        ws_r.cell(r_row, 8, pct_p).alignment = Alignment(horizontal="center")
+                        if tot_p == dem_p: ws_r.cell(r_row, 8).fill = VERT
+                        elif tot_p == 0: ws_r.cell(r_row, 8).fill = ROUGE
+                        else: ws_r.cell(r_row, 8).fill = ORANGE
                         r_row += 1
 
                     # -- Section C : Detail par configuration --
@@ -1830,7 +1816,7 @@ with tab4:
                     for ci in range(1, 22): ws_r.cell(r_row, ci).fill = BLEU_FONCE
                     r_row += 1
                     cols_cfg = [c for c in ['Constructeur','Conf','Version','Conf|version','Priorité','Demande','Prix',
-                                            'Opti réemploi','Opti Next','BOM Next',
+                                            'Opti réemploi',
                                             '20%','Cout 20%','40%','Cout 40%','60%','Cout 60%','80%','Cout 80%',
                                             'Total','Restant','RUPTURE','Seuil rupture','Cout conf restantes'] if c in all_demands_xls.columns]
                     for i, h in enumerate(cols_cfg, 1):
@@ -1845,7 +1831,7 @@ with tab4:
                     # Ligne TOTAL
                     ws_r.cell(r_row, 1, "TOTAL")
                     cidx_cfg = {cols_cfg[i]: i+1 for i in range(len(cols_cfg))}
-                    for cn in ['Demande','Opti réemploi','Opti Next','20%','Cout 20%','40%','Cout 40%','60%','Cout 60%','80%','Cout 80%','Total','Restant','Cout conf restantes']:
+                    for cn in ['Demande','Opti réemploi','20%','Cout 20%','40%','Cout 40%','60%','Cout 60%','80%','Cout 80%','Total','Restant','Cout conf restantes']:
                         if cn in cidx_cfg: ws_r.cell(r_row, cidx_cfg[cn], df_cfg[cn].sum())
                     ligne_total_j2(ws_r, r_row, len(cols_cfg))
                     # Formatage Section C
@@ -1853,7 +1839,7 @@ with tab4:
                         for ci in range(1, len(cols_cfg)+1):
                             cell = ws_r.cell(rn, ci); h = cols_cfg[ci-1]
                             if h in ['Prix','Cout 20%','Cout 40%','Cout 60%','Cout 80%','Cout conf restantes'] and isinstance(cell.value, (int, float)): cell.number_format = EURO_FMT
-                            elif h in ['Demande','Opti réemploi','Opti Next','20%','40%','60%','80%','Total','Restant'] and isinstance(cell.value, (int, float)): cell.number_format = NUM_FMT
+                            elif h in ['Demande','Opti réemploi','20%','40%','60%','80%','Total','Restant'] and isinstance(cell.value, (int, float)): cell.number_format = NUM_FMT
                     if 'RUPTURE' in cidx_cfg:
                         for rn in range(start_cfg, r_row):
                             c = ws_r.cell(rn, cidx_cfg['RUPTURE'])
