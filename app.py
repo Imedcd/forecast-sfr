@@ -1009,7 +1009,8 @@ with tab3:
                     st.markdown('<div class="kpi-label">Résultats de l\'optimisation</div>', unsafe_allow_html=True)
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Demande totale de configuration", f"{int(total_demande)}")
-                    c2.metric("Configurations réalisables", f"{int(total_j1)}")
+                    _label_real = f"Configurations réalisables (dont {int(total_j1_next)} via substitution)" if total_j1_next > 0 else "Configurations réalisables"
+                    c2.metric(_label_real, f"{int(total_j1)}")
                     c3.metric("Taux de réalisation", f"{pct_j1:.1f}%")
                     c4.metric("Valeur stock consommable", f"{cout_j1:,.0f} €".replace(',', ' '))
 
