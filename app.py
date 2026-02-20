@@ -495,15 +495,18 @@ with tab2:
                     df_prio_raw['Demande'] = pd.to_numeric(df_prio_raw['Demande'], errors='coerce').fillna(0).astype(int)
                     df_prio_raw = df_prio_raw[df_prio_raw['Demande'] > 0].copy()
 
-                    # Agréger la demande par Conf
-                    demand_by_conf = df_prio_raw.groupby('Conf', as_index=False)['Demande'].sum()
-                    demand_conf_map = dict(zip(demand_by_conf['Conf'], demand_by_conf['Demande']))
+                    # Agréger la demande par (Constructeur, Conf)
+                    demand_by_cconf = df_prio_raw.groupby(['Constructeur', 'Conf'], as_index=False)['Demande'].sum()
+                    demand_conf_map = {}
+                    for _, row in demand_by_cconf.iterrows():
+                        demand_conf_map[(row['Constructeur'], row['Conf'])] = row['Demande']
 
-                    # Versions disponibles par Conf
+                    # Versions disponibles par (Constructeur, Conf)
                     versions_by_conf = {}
-                    for conf in demand_conf_map:
-                        cvs = df_prio_raw[df_prio_raw['Conf'] == conf]['Conf|version'].unique().tolist()
-                        versions_by_conf[conf] = cvs
+                    for (cstr, conf) in demand_conf_map:
+                        mask = (df_prio_raw['Constructeur'] == cstr) & (df_prio_raw['Conf'] == conf)
+                        cvs = df_prio_raw[mask]['Conf|version'].unique().tolist()
+                        versions_by_conf[(cstr, conf)] = cvs
 
                     # Détail par version (pour l'affichage)
                     df_versions = df_prio_raw[['Constructeur', 'Conf', 'Version', 'Conf|version']].drop_duplicates('Conf|version')
@@ -517,15 +520,15 @@ with tab2:
 
                     # Toutes les Conf|versions avec BOM disponible
                     all_cvs = []
-                    for conf, cvs in versions_by_conf.items():
+                    for key, cvs in versions_by_conf.items():
                         for cv in cvs:
                             if cv in q.index:
                                 all_cvs.append(cv)
 
                     cv_to_conf = {}
-                    for conf, cvs in versions_by_conf.items():
+                    for key, cvs in versions_by_conf.items():
                         for cv in cvs:
-                            cv_to_conf[cv] = conf
+                            cv_to_conf[cv] = key
 
                     # Étape 1 : max nombre de configs
                     prob1 = LpProblem("Max_Nb_Configs", LpMaximize)
@@ -643,9 +646,9 @@ with tab2:
                         ws_dem.cell(1, i).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                     rw = 2
                     _merge_dem = [2, 5, 7, 8, 9]  # colonnes Conf-level
-                    for conf in sorted(demand_conf_map.keys()):
-                        dem = demand_conf_map[conf]
-                        cvs = versions_by_conf[conf]
+                    for (cstr_k, conf_k) in sorted(demand_conf_map.keys()):
+                        dem = demand_conf_map[(cstr_k, conf_k)]
+                        cvs = versions_by_conf[(cstr_k, conf_k)]
                         prod_c = sum(produced.get(cv, 0) for cv in cvs)
                         rest = dem - prod_c
                         pct_c = round(prod_c / dem * 100, 1) if dem > 0 else 0
@@ -654,8 +657,7 @@ with tab2:
                             qty = produced.get(cv, 0)
                             vm = df_versions[df_versions['Conf|version'] == cv]
                             ver = vm['Version'].iloc[0] if not vm.empty else cv.split('|')[0]
-                            cv_cstr = vm['Constructeur'].iloc[0] if not vm.empty else ''
-                            ws_dem.cell(rw, 1, cv_cstr); ws_dem.cell(rw, 2, conf)
+                            ws_dem.cell(rw, 1, cstr_k); ws_dem.cell(rw, 2, conf_k)
                             ws_dem.cell(rw, 3, ver); ws_dem.cell(rw, 4, cv)
                             ws_dem.cell(rw, 5, dem).number_format = _NUM
                             ws_dem.cell(rw, 6, qty).number_format = _NUM
@@ -749,9 +751,9 @@ with tab2:
                         ws_res.cell(rr, i).alignment = Alignment(horizontal="center")
                     rr += 1
                     _merge_res = [2, 5, 7, 8, 9]
-                    for conf in sorted(demand_conf_map.keys()):
-                        dem = demand_conf_map[conf]
-                        cvs = versions_by_conf[conf]
+                    for (cstr_k, conf_k) in sorted(demand_conf_map.keys()):
+                        dem = demand_conf_map[(cstr_k, conf_k)]
+                        cvs = versions_by_conf[(cstr_k, conf_k)]
                         prod_c = sum(produced.get(cv, 0) for cv in cvs)
                         rest = dem - prod_c
                         pct_c = (prod_c / dem * 100) if dem > 0 else 0
@@ -760,9 +762,8 @@ with tab2:
                             qty = produced.get(cv, 0)
                             vm = df_versions[df_versions['Conf|version'] == cv]
                             ver = vm['Version'].iloc[0] if not vm.empty else cv.split('|')[0]
-                            cv_cstr = vm['Constructeur'].iloc[0] if not vm.empty else ''
-                            ws_res.cell(rr, 1, cv_cstr)
-                            ws_res.cell(rr, 2, conf)
+                            ws_res.cell(rr, 1, cstr_k)
+                            ws_res.cell(rr, 2, conf_k)
                             ws_res.cell(rr, 3, ver)
                             ws_res.cell(rr, 4, cv)
                             ws_res.cell(rr, 5, dem).number_format = _NUM
@@ -817,21 +818,18 @@ with tab2:
 
             rows_disp = []
             conf_summ = []
-            for conf in sorted(_dcm.keys()):
-                dem = _dcm[conf]; cvs = _vbc[conf]
+            for (cstr_key, conf) in sorted(_dcm.keys()):
+                dem = _dcm[(cstr_key, conf)]; cvs = _vbc[(cstr_key, conf)]
                 prod_c = sum(_prod.get(cv, 0) for cv in cvs)
                 rest = dem - prod_c
                 pct_c = round(prod_c / dem * 100, 1) if dem > 0 else 0
-                m = _dfv[_dfv['Conf'] == conf]
-                cstr = m['Constructeur'].iloc[0] if not m.empty else '?'
-                conf_summ.append({'Constructeur': cstr, 'Demande': dem, 'Produit': prod_c})
+                conf_summ.append({'Constructeur': cstr_key, 'Demande': dem, 'Produit': prod_c})
                 for cv in cvs:
                     qty = _prod.get(cv, 0)
                     vm = _dfv[_dfv['Conf|version'] == cv]
                     ver = vm['Version'].iloc[0] if not vm.empty else cv.split('|')[0]
-                    cv_c = vm['Constructeur'].iloc[0] if not vm.empty else ''
                     rows_disp.append({
-                        'Constructeur': cv_c, 'Conf': conf, 'Version': ver,
+                        'Constructeur': cstr_key, 'Conf': conf, 'Version': ver,
                         'Conf|version': cv, 'Demande (Conf)': dem, 'Produit': qty,
                         '% Réalisé (Conf)': pct_c, 'Restant (Conf)': rest,
                     })
@@ -851,7 +849,8 @@ with tab2:
             st.markdown('<div class="kpi-label">Détail des références par configuration</div>', unsafe_allow_html=True)
 
             conf_opts = sorted(_dcm.keys())
-            sel_conf = st.selectbox("Configuration", conf_opts, key="sel_conf_sp")
+            conf_labels = {k: f"{k[0]} — {k[1]}" for k in conf_opts}
+            sel_conf = st.selectbox("Configuration", conf_opts, format_func=lambda k: conf_labels[k], key="sel_conf_sp")
 
             if sel_conf:
                 dem_s = _dcm[sel_conf]; cvs_s = _vbc[sel_conf]
@@ -1009,29 +1008,17 @@ with tab3:
                     st.markdown('<div class="kpi-label">Résultats de l\'optimisation</div>', unsafe_allow_html=True)
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Demande totale de configuration", f"{int(total_demande)}")
-                    _label_real = f"Configurations réalisables (dont {int(total_j1_next)} via substitution)" if total_j1_next > 0 else "Configurations réalisables"
-                    c2.metric(_label_real, f"{int(total_j1)}")
+                    c2.metric("Configurations réalisables", f"{int(total_j1)}")
                     c3.metric("Taux de réalisation", f"{pct_j1:.1f}%")
                     c4.metric("Valeur stock consommable", f"{cout_j1:,.0f} €".replace(',', ' '))
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown('<div class="kpi-label">Détail par configuration</div>', unsafe_allow_html=True)
-                    det_cols3 = ['Constructeur', 'Conf|version', 'Priorité', 'Demande', 'J1 produit']
-                    if total_j1_next > 0:
-                        det_cols3 += ['J1 Next', 'BOM Next', 'J1 total']
-                    det_cols3.append('Restant J1')
+                    det_cols3 = ['Constructeur', 'Conf|version', 'Priorité', 'Demande', 'J1 total', 'Restant J1']
                     detail_df = all_demands[det_cols3].copy()
-                    rename3 = {'Demande': 'Configuration demandée', 'J1 produit': 'Réalisable (BOM originale)', 'Restant J1': 'Restant'}
-                    if total_j1_next > 0:
-                        rename3['J1 Next'] = 'Réalisable (substitution)'
-                        rename3['BOM Next'] = 'BOM substitution'
-                        rename3['J1 total'] = 'Configuration réalisable'
-                        detail_df = detail_df.rename(columns=rename3)
-                        detail_df['% Réalisé'] = (detail_df['Configuration réalisable'] / detail_df['Configuration demandée'] * 100).round(1)
-                    else:
-                        rename3['J1 produit'] = 'Configuration réalisable'
-                        detail_df = detail_df.rename(columns=rename3)
-                        detail_df['% Réalisé'] = (detail_df['Configuration réalisable'] / detail_df['Configuration demandée'] * 100).round(1)
+                    rename3 = {'Demande': 'Configuration demandée', 'J1 total': 'Configuration réalisable', 'Restant J1': 'Restant'}
+                    detail_df = detail_df.rename(columns=rename3)
+                    detail_df['% Réalisé'] = (detail_df['Configuration réalisable'] / detail_df['Configuration demandée'] * 100).round(1)
                     st.dataframe(detail_df, use_container_width=True, height=350, hide_index=True)
 
                     if 'Constructeur' in all_demands.columns:
@@ -1089,19 +1076,10 @@ with tab3:
 
                     # ---- Onglet 1 : Demandes ----
                     ws_dem2 = wb_ap.active; ws_dem2.title = "Demandes"
-                    cols_exp2 = ['Constructeur','Conf','Version','Priorité','Demande','J1 produit']
-                    if total_j1_next > 0:
-                        cols_exp2 += ['J1 Next', 'BOM Next', 'J1 total']
-                    cols_exp2.append('Restant J1')
+                    cols_exp2 = ['Constructeur','Conf','Version','Priorité','Demande','J1 total','Restant J1']
                     cols_exp2 = [c for c in cols_exp2 if c in df_ap_exp.columns]
                     df_exp2 = df_ap_exp[cols_exp2].copy()
-                    rename_dem2 = {'Demande': 'Demande de configuration', 'J1 produit': 'Nb réalisable (BOM originale)', 'Restant J1': 'Restant'}
-                    if total_j1_next > 0:
-                        rename_dem2['J1 Next'] = 'Nb réalisable (substitution)'
-                        rename_dem2['BOM Next'] = 'BOM substitution'
-                        rename_dem2['J1 total'] = 'Nombre de configuration réalisable'
-                    else:
-                        rename_dem2['J1 produit'] = 'Nombre de configuration réalisable'
+                    rename_dem2 = {'Demande': 'Demande de configuration', 'J1 total': 'Nombre de configuration réalisable', 'Restant J1': 'Restant'}
                     df_exp2 = df_exp2.rename(columns=rename_dem2)
                     df_exp2 = df_exp2.sort_values(['Constructeur','Priorité'] if 'Constructeur' in df_exp2.columns else ['Priorité'])
                     for rr in dataframe_to_rows(df_exp2, index=False, header=True): ws_dem2.append(rr)
@@ -1174,8 +1152,6 @@ with tab3:
                         ("Total de conf demandé", int(total_demande)),
                         ("Total de conf réalisable", int(total_j1)),
                     ]
-                    if total_j1_next > 0:
-                        recap_lines2.append(("  dont via substitution (Next)", int(total_j1_next)))
                     recap_lines2 += [
                         ("% Réalisation", f"{pct_j1:.1f}%"),
                         ("Restant", int(total_demande - total_j1)),
@@ -1497,85 +1473,6 @@ with tab4:
                                                       'Prix conf': prix_configs[cv], 'Cout achat': round(cout_refs_necessaire, 2),
                                                       'Cout moyen/conf': round(cout_refs_necessaire, 2),
                                                       '% du prix': round(pct_cout, 1), 'Statut': 'Bloque'})
-                            # --- Substitution Next pour J2 (seuil/prio) ---
-                            if next_map:
-                                next_j2_cand = {}
-                                for cv in configs_prio:
-                                    rem = restant.get((cv, prio), 0)
-                                    if rem > 0 and cv in next_map:
-                                        ncv = next_map[cv]
-                                        if ncv in q.index and cv in prix_configs:
-                                            next_j2_cand[cv] = (ncv, rem)
-                                if next_j2_cand:
-                                    next_refs_j2 = sorted(set(ref for cv, (ncv, _) in next_j2_cand.items() for ref in q.columns if q.at[ncv, ref] > 0))
-                                    next_bom_j2 = {cv: {ref: q.at[ncv, ref] for ref in q.columns if q.at[ncv, ref] > 0} for cv, (ncv, _) in next_j2_cand.items()}
-                                    prob_nj1 = LpProblem(f"NextJ2_S{seuil_pct}_P{prio}_Max", LpMaximize)
-                                    XNv, SNv, BNv = {}, {}, {}
-                                    for cv, (ncv, rem) in next_j2_cand.items():
-                                        XNv[cv] = LpVariable(f"XN_{sname(cv)}_s{seuil_pct}", 0, rem, LpInteger)
-                                        for ref, bom_qty in next_bom_j2[cv].items():
-                                            SNv[(cv, ref)] = LpVariable(f"SN_{sname(cv)}_{sname(ref)}_s{seuil_pct}", 0)
-                                            BNv[(cv, ref)] = LpVariable(f"BN_{sname(cv)}_{sname(ref)}_s{seuil_pct}", 0)
-                                            prob_nj1 += SNv[(cv, ref)] + BNv[(cv, ref)] == bom_qty * XNv[cv]
-                                    prob_nj1 += lpSum(XNv.values())
-                                    for ref in next_refs_j2:
-                                        s_vars = [SNv[(cv, ref)] for cv in next_j2_cand if (cv, ref) in SNv]
-                                        if s_vars:
-                                            dispo = max(0, float(stock_j2[ref])) if ref in stock_j2.index else 0
-                                            prob_nj1 += lpSum(s_vars) <= dispo
-                                    for cv in next_j2_cand:
-                                        budget_cv = seuil * prix_configs[cv]
-                                        cout_cv = lpSum(BNv[(cv, ref)] * ref_to_prix.get(ref, 0) for ref in next_bom_j2[cv] if (cv, ref) in BNv)
-                                        prob_nj1 += cout_cv <= budget_cv * XNv[cv]
-                                    prob_nj1.solve(PULP_CBC_CMD(msg=0, gapRel=0.0))
-                                    max_n_next = int(round(value(prob_nj1.objective) or 0))
-                                    if max_n_next > 0:
-                                        prob_nj2 = LpProblem(f"NextJ2_S{seuil_pct}_P{prio}_Min", LpMinimize)
-                                        XN2, SN2, BN2 = {}, {}, {}
-                                        for cv, (ncv, rem) in next_j2_cand.items():
-                                            XN2[cv] = LpVariable(f"XN2_{sname(cv)}_s{seuil_pct}", 0, rem, LpInteger)
-                                            for ref, bom_qty in next_bom_j2[cv].items():
-                                                SN2[(cv, ref)] = LpVariable(f"SN2_{sname(cv)}_{sname(ref)}_s{seuil_pct}", 0)
-                                                BN2[(cv, ref)] = LpVariable(f"BN2_{sname(cv)}_{sname(ref)}_s{seuil_pct}", 0)
-                                                prob_nj2 += SN2[(cv, ref)] + BN2[(cv, ref)] == bom_qty * XN2[cv]
-                                        prob_nj2 += lpSum(BN2[(cv, ref)] * ref_to_prix.get(ref, 0)
-                                                         for cv in next_j2_cand for ref in next_bom_j2[cv] if (cv, ref) in BN2)
-                                        prob_nj2 += lpSum(XN2.values()) == max_n_next
-                                        for ref in next_refs_j2:
-                                            s_vars = [SN2[(cv, ref)] for cv in next_j2_cand if (cv, ref) in SN2]
-                                            if s_vars:
-                                                dispo = max(0, float(stock_j2[ref])) if ref in stock_j2.index else 0
-                                                prob_nj2 += lpSum(s_vars) <= dispo
-                                        for cv in next_j2_cand:
-                                            budget_cv = seuil * prix_configs[cv]
-                                            cout_cv = lpSum(BN2[(cv, ref)] * ref_to_prix.get(ref, 0) for ref in next_bom_j2[cv] if (cv, ref) in BN2)
-                                            prob_nj2 += cout_cv <= budget_cv * XN2[cv]
-                                        prob_nj2.solve(PULP_CBC_CMD(msg=0, gapRel=0.01))
-                                        for cv in next_j2_cand:
-                                            qty_n = int(round(lp_val(XN2[cv])))
-                                            if qty_n > 0:
-                                                cout_achat_n = sum(lp_val(BN2[(cv, ref)]) * ref_to_prix.get(ref, 0) for ref in next_bom_j2[cv] if (cv, ref) in BN2)
-                                                pct_moy_n = (cout_achat_n / (prix_configs[cv] * qty_n) * 100) if prix_configs[cv] > 0 else 0
-                                                restant[(cv, prio)] -= qty_n
-                                                total_seuil += qty_n
-                                                cout_seuil += cout_achat_n
-                                                for ref in next_bom_j2[cv]:
-                                                    if (cv, ref) in SN2:
-                                                        used = round(lp_val(SN2[(cv, ref)]), 4)
-                                                        if used > 0 and ref in stock_j2.index:
-                                                            stock_j2[ref] -= used
-                                                            consumed_j2[ref] = consumed_j2.get(ref, 0) + used
-                                                    if (cv, ref) in BN2:
-                                                        bought = round(lp_val(BN2[(cv, ref)]), 4)
-                                                        if bought > 0:
-                                                            achats_j2[ref] = achats_j2.get(ref, 0) + bought
-                                                ncv = next_j2_cand[cv][0]
-                                                detail_j2.append({'Seuil': f"{seuil_pct}%", 'Priorité': prio, 'Conf|version': cv,
-                                                                  'Nb produit': qty_n, 'Demande restante': next_j2_cand[cv][1],
-                                                                  'Prix conf': prix_configs[cv], 'Cout achat': round(cout_achat_n, 2),
-                                                                  'Cout moyen/conf': round(cout_achat_n / qty_n, 2),
-                                                                  '% du prix': round(pct_moy_n, 1), 'Statut': f'Produit (Next: {ncv})'})
-
                             for cv in sans_prix_prio:
                                 detail_j2.append({'Seuil': f"{seuil_pct}%", 'Priorité': prio, 'Conf|version': cv,
                                                   'Nb produit': 0, 'Demande restante': restant.get((cv, prio), 0),
@@ -1608,80 +1505,22 @@ with tab4:
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown('<div class="kpi-label">Configuration réalisable par seuil</div>', unsafe_allow_html=True)
 
-                    # Compter les substitutions Next dans J2 par seuil
-                    next_j2_par_seuil = {}
-                    next_j2_details = []
-                    for d in detail_j2:
-                        if d['Statut'].startswith('Produit (Next:'):
-                            s_val = d['Seuil'].replace('%', '')
-                            s_int = int(s_val)
-                            next_j2_par_seuil[s_int] = next_j2_par_seuil.get(s_int, 0) + d['Nb produit']
-                            # Extraire le BOM Next du statut
-                            bom_next = d['Statut'].replace('Produit (Next: ', '').rstrip(')')
-                            next_j2_details.append({
-                                'Conf|version': d['Conf|version'],
-                                'BOM substitution': bom_next,
-                                'Seuil': d['Seuil'],
-                                'Priorité': d['Priorité'],
-                                'Nb produit': d['Nb produit'],
-                                'Coût achat': d['Cout achat'],
-                            })
-                    total_next_j2 = sum(next_j2_par_seuil.values())
-
                     cumul = total_j1
                     seuil_rows = [{'Etape': 'Opti du réemploi', 'Config réalisable': int(total_j1),
                                    'Coût stock consommable': f"{cout_j1:,.0f}".replace(',', ' '),
                                    'Coût achat réf. unitaire': '0',
                                    'Cumul des conf réalisable': int(total_j1),
                                    'Taux réalisable': f"{pct_j1:.1f}%"}]
-                    if total_j1_next > 0:
-                        seuil_rows[0]['Etape'] = f"Opti du réemploi (dont {int(total_j1_next)} via Next)"
                     for s_pct in [20, 40, 60, 80]:
                         prod = j2_prod_par_seuil.get(s_pct, 0)
                         cout = j2_cout_par_seuil.get(s_pct, 0)
                         cumul += prod
-                        etape_label = f'Seuil {s_pct}%'
-                        next_count = next_j2_par_seuil.get(s_pct, 0)
-                        if next_count > 0:
-                            etape_label = f'Seuil {s_pct}% (dont {int(next_count)} via Next)'
-                        seuil_rows.append({'Etape': etape_label, 'Config réalisable': int(prod),
+                        seuil_rows.append({'Etape': f'Seuil {s_pct}%', 'Config réalisable': int(prod),
                                            'Coût stock consommable': '0',
                                            'Coût achat réf. unitaire': f"{cout:,.0f}".replace(',', ' '),
                                            'Cumul des conf réalisable': int(cumul),
                                            'Taux réalisable': f"{(cumul/total_demande*100):.1f}%"})
                     st.dataframe(pd.DataFrame(seuil_rows), use_container_width=True, hide_index=True)
-
-                    # ---- DETAIL DES SUBSTITUTIONS (NEXT) ----
-                    total_next_all = int(total_j1_next) + total_next_j2
-                    if total_next_all > 0:
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        st.markdown(f'<div class="kpi-label">Configurations produites via substitution (Next) — {int(total_next_all)} au total</div>', unsafe_allow_html=True)
-
-                        # J1 Next
-                        next_j1_rows = []
-                        if total_j1_next > 0:
-                            for _, row in all_demands.iterrows():
-                                if row['J1 Next'] > 0:
-                                    next_j1_rows.append({
-                                        'Conf|version': row['Conf|version'],
-                                        'BOM substitution': row['BOM Next J1'],
-                                        'Etape': 'Réemploi (J1)',
-                                        'Priorité': row['Priorité'],
-                                        'Nb produit': int(row['J1 Next']),
-                                        'Coût achat': 0,
-                                    })
-
-                        all_next_rows = next_j1_rows + next_j2_details
-                        df_next = pd.DataFrame(all_next_rows)
-                        df_next = df_next.rename(columns={'Nb produit': 'Qté produite', 'Coût achat': 'Coût achat (€)'})
-                        if 'Seuil' in df_next.columns:
-                            df_next['Etape'] = df_next['Etape'].fillna('')
-                            mask_j2 = df_next['Etape'] == ''
-                            df_next.loc[mask_j2, 'Etape'] = 'Seuil ' + df_next.loc[mask_j2, 'Seuil'].astype(str)
-                            df_next = df_next.drop(columns=['Seuil'])
-                        display_cols = ['Conf|version', 'BOM substitution', 'Etape', 'Priorité', 'Qté produite', 'Coût achat (€)']
-                        display_cols = [c for c in display_cols if c in df_next.columns]
-                        st.dataframe(df_next[display_cols], use_container_width=True, hide_index=True)
 
                     # ---- RÉPARTITION PAR CONSTRUCTEUR ----
                     if 'Constructeur' in all_demands.columns:
